@@ -21,6 +21,7 @@ Documents are Chinese. Code, comments, commit messages, test names, and anything
   - Data directory from `PIGROUPS_DATA` (default `./.data`), created if missing.
   - Prints exactly one line to stdout when it is ready to accept requests: `listening on <port>`
   - On `SIGTERM` / `SIGINT`: stop accepting, close the DB, exit `0`.
+  - `PIGROUPS_ADMIN_TOKEN`, when set, is read from the environment. `POST /v1/humans` requires it
 - `npm test` → `node --test test/*.test.ts`
 - `npm run typecheck` → `tsc --noEmit`
 
