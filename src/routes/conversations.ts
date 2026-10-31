@@ -6,6 +6,7 @@ import {
   MAX_MESSAGE_BODY_BYTES,
   MAX_META_BYTES,
   activePrincipal,
+  assertCanWrite,
   byteLength,
   clamp,
   intQuery,
@@ -22,6 +23,7 @@ import {
   dmConvId,
   getMember,
   groupMembers,
+  inboxRecipients,
   mentionsOf,
   parseDmConv,
   senderName,
@@ -78,7 +80,10 @@ export function registerConversationRoutes(app: Hono<AppEnv>, ctx: AppContext): 
     if (textSize > MAX_MESSAGE_BODY_BYTES) throw payloadTooLarge(MAX_MESSAGE_BODY_BYTES, textSize);
 
     const requestedMentions = optionalStringArray(body, 'mentions') ?? [];
-    const clientMsgId = optionalString(body, 'client_msg_id');
+    // An empty key is not a key: `""` is normalised to NULL, so it neither
+    // collides with itself in `ux_msg_idem` nor replays (§12).
+    const rawClientMsgId = optionalString(body, 'client_msg_id');
+    const clientMsgId = rawClientMsgId === '' ? undefined : rawClientMsgId;
     let metaJson: string | null = null;
     if (body.meta !== undefined && body.meta !== null) {
       metaJson = JSON.stringify(body.meta);
@@ -91,6 +96,28 @@ export function registerConversationRoutes(app: Hono<AppEnv>, ctx: AppContext): 
     const createdAt = Date.now();
 
     const result = tx(db, () => {
+      // The middleware saw the caller at request start; a `DELETE` may have
+      // committed while the body was being read, so the ban on writing after
+      // `gone` is re-checked inside the write transaction (§8.3).
+      assertCanWrite(db, principal);
+
+      // A replay answers with the stored result before any target or group
+      // validation: the recipient may be gone or the group empty by now, and the
+      // answer is still the original `seq` (§7.1, §12).
+      if (clientMsgId !== undefined) {
+        const existing = db
+          .prepare('SELECT * FROM messages WHERE sender_id = ? AND client_msg_id = ?')
+          .get(senderId, clientMsgId) as unknown as MessageRow | undefined;
+        if (existing) {
+          return {
+            to: existing.conv_id,
+            seq: Number(existing.seq),
+            recipients: inboxRecipients(db, existing.conv_id, Number(existing.seq)),
+            created_at: Number(existing.created_at),
+          };
+        }
+      }
+
       let convId: string;
       let recipients: string[];
       let mentions: string[] = [];
@@ -127,20 +154,6 @@ export function registerConversationRoutes(app: Hono<AppEnv>, ctx: AppContext): 
         if (requestedMentions.length > 0) throw badRequest('mentions are not allowed in a one-to-one conversation');
         convId = dmConvId(senderId, target.id);
         recipients = [target.id];
-      }
-
-      if (clientMsgId !== undefined && clientMsgId !== '') {
-        const existing = db
-          .prepare('SELECT * FROM messages WHERE sender_id = ? AND client_msg_id = ?')
-          .get(senderId, clientMsgId) as unknown as MessageRow | undefined;
-        if (existing) {
-          return {
-            to: existing.conv_id,
-            seq: Number(existing.seq),
-            recipients,
-            created_at: Number(existing.created_at),
-          };
-        }
       }
 
       db.prepare('INSERT INTO conversation_seqs (conv_id, last_seq) VALUES (?, 0) ON CONFLICT(conv_id) DO NOTHING').run(
@@ -199,6 +212,14 @@ export function registerConversationRoutes(app: Hono<AppEnv>, ctx: AppContext): 
       created_at: Number(message.created_at),
     }));
 
-    return ok(c, { items, next: ascending.length > 0 ? Number(ascending[0].seq) : null });
+    // `next` is the `before` value for the previous page, and `null` once the
+    // page has reached the oldest message (§5.3).
+    const oldestServed = ascending.length > 0 ? Number(ascending[0].seq) : null;
+    const hasOlder =
+      oldestServed !== null &&
+      db.prepare('SELECT 1 FROM messages WHERE conv_id = ? AND seq < ? LIMIT 1').get(convId, oldestServed) !== undefined;
+    const next = hasOlder ? oldestServed : null;
+
+    return ok(c, { items, next });
   });
 }

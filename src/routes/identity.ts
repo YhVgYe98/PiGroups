@@ -4,8 +4,8 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { AppContext, AppEnv } from '../context.ts';
 import { tx } from '../db.ts';
 import { alreadyBootstrapped, forbidden, nameTaken } from '../errors.ts';
-import { activePrincipal, ok, optionalString, readJson } from '../http.ts';
-import { hashToken, newId, newToken, randomName } from '../ids.ts';
+import { activePrincipal, ok, optionalName, readJson } from '../http.ts';
+import { hashToken, newId, newToken, randomName, tokensMatch } from '../ids.ts';
 import { type HumanRow, type MemberRow, getHuman, getMember, isNameTaken } from '../store.ts';
 import { SERVER_VERSION } from '../version.ts';
 import { conversationItems, dmRefsOf, groupRefsOf, memberView } from '../views.ts';
@@ -46,12 +46,18 @@ function requestIsLoopback(c: Context<AppEnv>): boolean {
   }
 }
 
+function presentedBearer(c: Context<AppEnv>): string {
+  const header = c.req.header('authorization') ?? '';
+  const match = /^Bearer\s+(\S+)$/i.exec(header.trim());
+  return match ? match[1] : '';
+}
+
 export function registerIdentityRoutes(app: Hono<AppEnv>, ctx: AppContext): void {
   const { db, startedAt } = ctx;
 
   app.post('/v1/bootstrap', async (c) => {
     const body = await readJson(c);
-    const requestedName = optionalString(body, 'name');
+    const requestedName = optionalName(body, 'name');
 
     const created = tx(db, () => {
       if (db.prepare('SELECT 1 FROM members WHERE is_root = 1').get() !== undefined) throw alreadyBootstrapped();
@@ -73,9 +79,19 @@ export function registerIdentityRoutes(app: Hono<AppEnv>, ctx: AppContext): void
   });
 
   app.post('/v1/humans', async (c) => {
+    // A human reads every conversation, so it must not be manufacturable by a
+    // member token or by anything else on loopback: the endpoint needs the admin
+    // token from the environment and is closed when that is unset (concept §6,
+    // design §10.2).
+    const adminToken = process.env.PIGROUPS_ADMIN_TOKEN;
+    if (adminToken === undefined || adminToken === '') {
+      throw forbidden('human creation is disabled: PIGROUPS_ADMIN_TOKEN is not set');
+    }
     if (!requestIsLoopback(c)) throw forbidden('humans can only be created from the server host');
+    if (!tokensMatch(presentedBearer(c), adminToken)) throw forbidden('PIGROUPS_ADMIN_TOKEN is required');
+
     const body = await readJson(c);
-    const requestedName = optionalString(body, 'name');
+    const requestedName = optionalName(body, 'name');
 
     const created = tx(db, () => {
       if (requestedName !== undefined && humanNameTaken(db, requestedName)) throw nameTaken(requestedName);

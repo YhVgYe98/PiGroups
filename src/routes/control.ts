@@ -5,6 +5,7 @@ import { badRequest, forbidden, invalidCmd, memberGone, noSuchGroup, notFound, p
 import {
   MAX_CONTROL_PAYLOAD_BYTES,
   activePrincipal,
+  assertCanWrite,
   byteLength,
   clamp,
   intQuery,
@@ -50,6 +51,28 @@ export function registerControlRoutes(app: Hono<AppEnv>, ctx: AppContext): void 
     const createdAt = Date.now();
 
     const outcome = tx(db, () => {
+      // The middleware saw the caller at request start; a `DELETE` may have
+      // committed while the body was being read, so the ban on writing after
+      // `gone` is re-checked inside the write transaction (§8.3).
+      assertCanWrite(db, principal);
+
+      // `(from_id, id)` is the sender's idempotency key: a replay returns the
+      // original `control_seq` before any reachability check, because the target
+      // may have gone away since (§7.1, §12).
+      const existing = getControlBySenderKey(db, fromId, controlId);
+      if (existing) {
+        return {
+          response: {
+            control_seq: Number(existing.seq),
+            receipts: receiptsFor(db, Number(existing.seq)).map((receipt) => ({
+              to_id: receipt.to_id,
+              state: receipt.state,
+            })),
+          },
+          targets: [] as string[],
+        };
+      }
+
       const targets: string[] = [];
       if (typeof to === 'string' && to.startsWith('g:')) {
         const ownerId = to.slice(2);
@@ -70,29 +93,17 @@ export function registerControlRoutes(app: Hono<AppEnv>, ctx: AppContext): void 
       }
 
       const unique = [...new Set(targets)];
+      if (unique.length === 0) throw badRequest('to must name at least one target');
       for (const targetId of unique) {
+        // A member may not command itself: `sharesGroup(a, a)` would pass, but
+        // self is none of the parent / child / sibling cases (§7.1).
+        if (targetId === fromId) throw badRequest('cannot send a control to yourself');
         const target = getMember(db, targetId);
         if (!target) throw notFound(`unknown member: ${targetId}`);
         if (target.status !== 'alive') throw memberGone(targetId);
         if (principal.kind === 'member' && !sharesGroup(db, fromId, targetId)) {
           throw forbidden(`${targetId} is not in one of your groups`);
         }
-      }
-
-      // `(from_id, id)` is the sender's idempotency key: a replay returns the
-      // original `control_seq` (§7.1).
-      const existing = getControlBySenderKey(db, fromId, controlId);
-      if (existing) {
-        return {
-          response: {
-            control_seq: Number(existing.seq),
-            receipts: receiptsFor(db, Number(existing.seq)).map((receipt) => ({
-              to_id: receipt.to_id,
-              state: receipt.state,
-            })),
-          },
-          targets: [] as string[],
-        };
       }
 
       const info = db

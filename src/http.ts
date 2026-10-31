@@ -1,17 +1,13 @@
 import type { Context } from 'hono';
-import type { ContentfulStatusCode } from 'hono/utils/http-status';
+import type { DatabaseSync } from 'node:sqlite';
 import type { AppEnv, Principal } from './context.ts';
-import type { MemberRow } from './store.ts';
+import { type MemberRow, getMember } from './store.ts';
 import { badRequest, forbidden, memberGone } from './errors.ts';
 import { SERVER_VERSION } from './version.ts';
 
 /** Every response carries `server_version` (design §10). */
 export function ok(c: Context<AppEnv>, body: Record<string, unknown>): Response {
   return c.json({ ...body, server_version: SERVER_VERSION });
-}
-
-export function fail(c: Context<AppEnv>, status: number, body: Record<string, unknown>): Response {
-  return c.json({ ...body, server_version: SERVER_VERSION }, status as ContentfulStatusCode);
 }
 
 export function principalOf(c: Context<AppEnv>): Principal {
@@ -57,6 +53,27 @@ export function requiredString(body: Record<string, unknown>, key: string): stri
   const value = optionalString(body, key);
   if (value === undefined || value === '') throw badRequest(`${key} is required`);
   return value;
+}
+
+/**
+ * A name, when given, must not be empty: it is the permanent label that history
+ * points at, so `""` is not a name (§4).
+ */
+export function optionalName(body: Record<string, unknown>, key: string): string | undefined {
+  const value = optionalString(body, key);
+  if (value === '') throw badRequest(`${key} must not be empty`);
+  return value;
+}
+
+/**
+ * Re-reads the caller inside a write transaction. The middleware's `status` is a
+ * request-start snapshot, and a `DELETE` may commit while the body is being read;
+ * the ban on writing after `gone` has to be held by the transaction itself (§8.3).
+ */
+export function assertCanWrite(db: DatabaseSync, principal: Principal): void {
+  if (principal.kind !== 'member') return;
+  const member = getMember(db, principal.member.id);
+  if (!member || member.status !== 'alive') throw memberGone(principal.member.id);
 }
 
 export function optionalStringArray(body: Record<string, unknown>, key: string): string[] | undefined {

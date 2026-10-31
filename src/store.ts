@@ -166,15 +166,22 @@ export function isInOwnSubtree(db: DatabaseSync, ancestorId: string, targetId: s
 
 /**
  * Senders may reach targets they share a group with: parent, child, or
- * same-parent sibling (concept §7).
+ * same-parent sibling (concept §7). A subject is not in a group with itself.
  */
 export function sharesGroup(db: DatabaseSync, a: string, b: string): boolean {
-  if (a === b) return true;
   const left = getMember(db, a);
   const right = getMember(db, b);
   if (!left || !right) return false;
   if (left.parent_id === b || right.parent_id === a) return true;
   return left.parent_id !== null && left.parent_id === right.parent_id;
+}
+
+/** The recipients a message was delivered to, in delivery order (§5.1). */
+export function inboxRecipients(db: DatabaseSync, convId: string, msgSeq: number): string[] {
+  const found = rows<{ member_id: string }>(
+    db.prepare('SELECT member_id FROM inbox WHERE conv_id = ? AND msg_seq = ? ORDER BY seq').all(convId, msgSeq),
+  );
+  return found.map((entry) => entry.member_id);
 }
 
 export function dmConvId(a: string, b: string): string {

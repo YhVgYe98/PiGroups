@@ -1,19 +1,39 @@
 import type { Hono } from 'hono';
 import type { AppContext, AppEnv } from '../context.ts';
-import { memberGone, pollInProgress, forbidden } from '../errors.ts';
+import { badRequest, memberGone, pollInProgress, forbidden } from '../errors.ts';
 import { clamp, intQuery, ok, principalOf } from '../http.ts';
 import { type PollTypes, consumeOnce, waitForWake } from '../feed.ts';
 
 const DEFAULT_WAIT_SECONDS = 25;
 const DEFAULT_LIMIT = 20;
 
+/**
+ * `types` accepts `message`, `control` and `all` (the default). An unknown token
+ * is an error rather than an empty set: silently consuming nothing parks the
+ * member and looks exactly like "no news" (§6.2).
+ */
 function parseTypes(raw: string | undefined): PollTypes {
   if (raw === undefined) return { message: true, control: true };
   const requested = raw
     .split(',')
     .map((entry) => entry.trim().toLowerCase())
     .filter((entry) => entry.length > 0);
-  return { message: requested.includes('message'), control: requested.includes('control') };
+  if (requested.length === 0) return { message: true, control: true };
+
+  const types: PollTypes = { message: false, control: false };
+  for (const token of requested) {
+    if (token === 'all') {
+      types.message = true;
+      types.control = true;
+    } else if (token === 'message') {
+      types.message = true;
+    } else if (token === 'control') {
+      types.control = true;
+    } else {
+      throw badRequest(`types must be message, control or all; got "${token}"`);
+    }
+  }
+  return types;
 }
 
 export function registerPollRoutes(app: Hono<AppEnv>, ctx: AppContext): void {

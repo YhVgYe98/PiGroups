@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { tx } from './db.ts';
 import {
   type ControlRow,
+  type SenderKind,
   getMember,
   mentionExists,
   memberCursor,
@@ -85,6 +86,12 @@ export function waitForWake(hub: PollHub, memberId: string, timeoutMs: number): 
 
 const PREVIEW_LENGTH = 200;
 
+/** 200 code points, so a surrogate pair is never split (§6.3). */
+function preview(body: string): string {
+  if (body.length <= PREVIEW_LENGTH) return body;
+  return Array.from(body).slice(0, PREVIEW_LENGTH).join('');
+}
+
 function parseJson(text: string | null): unknown {
   if (text === null) return null;
   try {
@@ -132,17 +139,20 @@ function takeControls(db: DatabaseSync, memberId: string, limit: number): Contro
   return items;
 }
 
-interface InboxRow {
+interface InboxRef {
   seq: number;
   conv_id: string;
   msg_seq: number;
+}
+
+interface MessageDetail {
   sender_id: string;
-  sender_kind: 'member' | 'human';
+  sender_kind: SenderKind;
   body: string;
   created_at: number;
 }
 
-function gapItems(db: DatabaseSync, memberId: string, skipped: InboxRow[], kept: InboxRow[]): GapItem[] {
+function gapItems(db: DatabaseSync, memberId: string, skipped: InboxRef[], kept: InboxRef[]): GapItem[] {
   const folded = new Map<string, { count: number; mentioned: number; newestSkipped: number }>();
   for (const entry of skipped) {
     const bucket = folded.get(entry.conv_id) ?? { count: 0, mentioned: 0, newestSkipped: 0 };
@@ -167,18 +177,24 @@ function gapItems(db: DatabaseSync, memberId: string, skipped: InboxRow[], kept:
   return gaps;
 }
 
-function messageItem(db: DatabaseSync, memberId: string, parentId: string | null, entry: InboxRow): MessageItem {
+function messageItem(
+  db: DatabaseSync,
+  memberId: string,
+  parentId: string | null,
+  entry: InboxRef,
+  detail: MessageDetail,
+): MessageItem {
   return {
     kind: 'message',
     to: entry.conv_id,
     seq: Number(entry.msg_seq),
-    from_id: entry.sender_id,
-    from_name: senderName(db, entry.sender_id, entry.sender_kind),
-    from_kind: entry.sender_kind,
-    preview: entry.body.slice(0, PREVIEW_LENGTH),
+    from_id: detail.sender_id,
+    from_name: senderName(db, detail.sender_id, detail.sender_kind),
+    from_kind: detail.sender_kind,
+    preview: preview(detail.body),
     mentions_me: mentionExists(db, entry.conv_id, Number(entry.msg_seq), memberId),
-    from_parent: parentId !== null && entry.sender_id === parentId,
-    at: Number(entry.created_at),
+    from_parent: parentId !== null && detail.sender_id === parentId,
+    at: Number(detail.created_at),
   };
 }
 
@@ -207,17 +223,12 @@ export function consumeOnce(db: DatabaseSync, memberId: string, limit: number, t
     let messages: MessageItem[] = [];
     if (types.message) {
       const cursor = memberCursor(db, memberId);
+      // Delivery order only: bodies are large (up to 64 KiB) and the backlog is
+      // unbounded, so the whole suffix is read as refs and bodies are fetched
+      // for the rows actually returned (§6.4).
       const backlog = db
-        .prepare(
-          `SELECT i.seq AS seq, i.conv_id AS conv_id, i.msg_seq AS msg_seq,
-                  m.sender_id AS sender_id, m.sender_kind AS sender_kind,
-                  m.body AS body, m.created_at AS created_at
-           FROM inbox i
-           JOIN messages m ON m.conv_id = i.conv_id AND m.seq = i.msg_seq
-           WHERE i.member_id = ? AND i.seq > ?
-           ORDER BY i.seq`,
-        )
-        .all(memberId, cursor) as unknown as InboxRow[];
+        .prepare('SELECT seq, conv_id, msg_seq FROM inbox WHERE member_id = ? AND seq > ? ORDER BY seq')
+        .all(memberId, cursor) as unknown as InboxRef[];
 
       let kept = backlog;
       if (backlog.length > limit) {
@@ -226,7 +237,13 @@ export function consumeOnce(db: DatabaseSync, memberId: string, limit: number, t
         kept = backlog.slice(backlog.length - limit);
         gaps = gapItems(db, memberId, backlog.slice(0, backlog.length - limit), kept);
       }
-      messages = kept.map((entry) => messageItem(db, memberId, member.parent_id, entry));
+      const selectDetail = db.prepare(
+        'SELECT sender_id, sender_kind, body, created_at FROM messages WHERE conv_id = ? AND seq = ?',
+      );
+      for (const entry of kept) {
+        const detail = selectDetail.get(entry.conv_id, entry.msg_seq) as unknown as MessageDetail | undefined;
+        if (detail) messages.push(messageItem(db, memberId, member.parent_id, entry, detail));
+      }
 
       if (kept.length > 0) {
         const newest = Number(kept[kept.length - 1].seq);

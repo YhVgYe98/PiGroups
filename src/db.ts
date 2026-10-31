@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS members (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_member_name ON members(name);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_root ON members(is_root) WHERE is_root = 1;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_spawn_idem ON members(parent_id, request_id) WHERE request_id IS NOT NULL;
+-- Token to subject lookup on every authenticated request (auth middleware). Not part of the identity model.
 CREATE INDEX IF NOT EXISTS ix_member_token ON members(token_hash);
 
 CREATE TABLE IF NOT EXISTS humans (
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS humans (
   created_at    INTEGER NOT NULL,
   last_seen_at  INTEGER
 );
+-- Token to subject lookup on every authenticated request (auth middleware). Not part of the identity model.
 CREATE INDEX IF NOT EXISTS ix_human_token ON humans(token_hash);
 
 CREATE TABLE IF NOT EXISTS conversation_seqs (
@@ -124,8 +126,4 @@ export function tx<T>(db: DatabaseSync, body: () => T): T {
     }
     throw error;
   }
-}
-
-export function now(): number {
-  return Date.now();
 }

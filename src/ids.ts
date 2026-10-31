@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomInt } from 'node:crypto';
+import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 
 const ADJECTIVES = [
   'quiet', 'brave', 'clever', 'steady', 'brisk', 'humble', 'keen', 'lucid',
@@ -31,7 +31,14 @@ export function randomName(): string {
   return `${adjective}-${noun}-${randomBytes(2).toString('hex')}`;
 }
 
-/** Values of the `mentions` array that mean "everyone in this group". */
+/** The one magic value of the `mentions` array: "everyone in this group" (§5.2). */
 export function isAllMention(value: string): boolean {
-  return value === 'all' || value === '@all';
+  return value === 'all';
+}
+
+/** Constant-time comparison, used for the admin token (§10.2). */
+export function tokensMatch(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
 }

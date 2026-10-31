@@ -3,7 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { AppContext, AppEnv } from '../context.ts';
 import { tx } from '../db.ts';
 import { forbidden, memberGone, nameTaken, notFound, rootProtected } from '../errors.ts';
-import { activeMember, activePrincipal, ok, optionalString, readJson } from '../http.ts';
+import { activeMember, activePrincipal, ok, optionalName, readJson, requiredString } from '../http.ts';
 import { hashToken, newId, newToken, randomName } from '../ids.ts';
 import { wakeMembers } from '../feed.ts';
 import {
@@ -13,6 +13,7 @@ import {
   isInOwnSubtree,
   isNameTaken,
   placeholders,
+  subtreeIds,
 } from '../store.ts';
 import { memberView } from '../views.ts';
 
@@ -30,8 +31,10 @@ export function registerOrgRoutes(app: Hono<AppEnv>, ctx: AppContext): void {
     const principal = activePrincipal(c);
     if (principal.kind !== 'member') throw forbidden('humans cannot create members');
     const body = await readJson(c);
-    const requestId = optionalString(body, 'request_id');
-    const requestedName = optionalString(body, 'name');
+    // `request_id` is the creation idempotency key, and `name` the only optional
+    // field of this request (§10.3).
+    const requestId = requiredString(body, 'request_id');
+    const requestedName = optionalName(body, 'name');
 
     const created = tx(db, () => {
       const caller = getMember(db, principal.member.id);
@@ -39,12 +42,10 @@ export function registerOrgRoutes(app: Hono<AppEnv>, ctx: AppContext): void {
 
       // Replaying a creation returns the original member; the plaintext token
       // was never stored, so it cannot be returned again (§8.1).
-      if (requestId !== undefined && requestId !== '') {
-        const existing = db
-          .prepare('SELECT * FROM members WHERE parent_id = ? AND request_id = ?')
-          .get(caller.id, requestId) as unknown as MemberRow | undefined;
-        if (existing) return { member: memberView(db, existing) };
-      }
+      const existing = db
+        .prepare('SELECT * FROM members WHERE parent_id = ? AND request_id = ?')
+        .get(caller.id, requestId) as unknown as MemberRow | undefined;
+      if (existing) return { member: memberView(db, existing) };
 
       if (requestedName !== undefined && isNameTaken(db, requestedName)) throw nameTaken(requestedName);
       const id = newId('m');
@@ -114,7 +115,9 @@ export function registerOrgRoutes(app: Hono<AppEnv>, ctx: AppContext): void {
         ).run(createdAt, ...alive);
       }
 
-      return alive;
+      // A repeat delete answers with the same ids, so a retrying client can see
+      // that the cascade already happened (§8.2).
+      return alive.length > 0 ? alive : subtreeIds(db, target.id);
     });
 
     wakeMembers(hub, terminated);
