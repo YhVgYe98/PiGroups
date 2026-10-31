@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -78,10 +78,17 @@ async function shutdown(child: ChildProcess): Promise<void> {
   await waitForExit(child, STOP_TIMEOUT_MS);
 }
 
+export type StartOptions = {
+  /** Reuse an existing data directory; stop() then leaves it in place for a restart. */
+  dataDir?: string;
+};
+
 /** Spawn the server, resolve once it prints `listening on <port>`, else fail loudly. */
-export async function startServer(): Promise<Server> {
+export async function startServer(options: StartOptions = {}): Promise<Server> {
   const port = await findFreePort();
-  const dataDir = await mkdtemp(join(tmpdir(), 'pigroups-test-'));
+  const ownsDataDir = options.dataDir === undefined;
+  const dataDir = options.dataDir ?? (await mkdtemp(join(tmpdir(), 'pigroups-test-')));
+  if (!ownsDataDir) await mkdir(dataDir, { recursive: true });
   const child = spawn(process.execPath, ['src/main.ts'], {
     cwd: REPO_ROOT,
     env: { ...process.env, PORT: String(port), PIGROUPS_DATA: dataDir },
@@ -139,7 +146,7 @@ export async function startServer(): Promise<Server> {
     scan();
   }).catch(async (error: unknown) => {
     await shutdown(child);
-    await rm(dataDir, { recursive: true, force: true });
+    if (ownsDataDir) await rm(dataDir, { recursive: true, force: true });
     throw error;
   });
 
@@ -148,7 +155,7 @@ export async function startServer(): Promise<Server> {
     if (stopped) return;
     stopped = true;
     await shutdown(child);
-    await rm(dataDir, { recursive: true, force: true });
+    if (ownsDataDir) await rm(dataDir, { recursive: true, force: true });
   };
 
   return { port, baseUrl: `http://127.0.0.1:${port}`, stop };
