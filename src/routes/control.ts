@@ -1,4 +1,5 @@
 import type { Hono } from 'hono';
+import type { DatabaseSync } from 'node:sqlite';
 import type { AppContext, AppEnv } from '../context.ts';
 import { tx } from '../db.ts';
 import { badRequest, forbidden, invalidCmd, memberGone, noSuchGroup, notFound, payloadTooLarge } from '../errors.ts';
@@ -18,6 +19,68 @@ import { wakeMembers } from '../feed.ts';
 import { type ControlRow, getControlBySenderKey, getMember, groupMembers, receiptsFor, sharesGroup } from '../store.ts';
 
 const MAX_CMD_LENGTH = 200;
+
+/** The per-recipient list, the same shape in both views of §7.3. */
+function receiptViews(db: DatabaseSync, controlSeq: number) {
+  return receiptsFor(db, controlSeq).map((receipt) => ({
+    to_id: receipt.to_id,
+    state: receipt.state,
+    delivered_at: receipt.delivered_at,
+  }));
+}
+
+type ControlPage = { items: unknown[]; next: number | null };
+
+/**
+ * The full view of §7.3: every instruction across all senders and recipients,
+ * `cmd` and `payload` included. Only a human reaches this, and only a human
+ * token is the reason the content can be shown at all.
+ */
+function allControlPage(
+  db: DatabaseSync,
+  since: number,
+  limit: number,
+  fromId: string | undefined,
+  to: string | undefined,
+): ControlPage {
+  const filters: string[] = [];
+  const filterParams: string[] = [];
+  if (fromId !== undefined) {
+    filters.push('from_id = ?');
+    filterParams.push(fromId);
+  }
+  if (to !== undefined) {
+    // `to` matches the request form as it was stored, so a group address is read
+    // back as the group address that was written (§7.3).
+    filters.push('to_json = ?');
+    filterParams.push(JSON.stringify(to));
+  }
+  const where = ['seq > ?', ...filters].join(' AND ');
+
+  const found = db
+    .prepare(`SELECT * FROM controls WHERE ${where} ORDER BY seq ASC LIMIT ?`)
+    .all(since, ...filterParams, limit) as unknown as ControlRow[];
+
+  const items = found.map((control) => ({
+    seq: Number(control.seq),
+    id: control.id,
+    from_id: control.from_id,
+    to: JSON.parse(control.to_json) as unknown,
+    cmd: control.cmd,
+    payload: control.payload_json === null ? null : (JSON.parse(control.payload_json) as unknown),
+    reply_to: control.reply_to,
+    receipts: receiptViews(db, Number(control.seq)),
+    created_at: Number(control.created_at),
+  }));
+
+  let next: number | null = null;
+  if (items.length > 0) {
+    const lastSeq = items[items.length - 1].seq;
+    const more = db.prepare(`SELECT 1 FROM controls WHERE ${where} LIMIT 1`).get(lastSeq, ...filterParams);
+    next = more === undefined ? null : lastSeq;
+  }
+  return { items, next };
+}
 
 export function registerControlRoutes(app: Hono<AppEnv>, ctx: AppContext): void {
   const { db, hub } = ctx;
@@ -133,6 +196,23 @@ export function registerControlRoutes(app: Hono<AppEnv>, ctx: AppContext): void 
 
   app.get('/v1/control', (c) => {
     const principal = activePrincipal(c);
+    // The presence of `all` decides, not its value: `?all`, `?all=1` and
+    // `?all=TRUE` have to be refused for a member instead of sliding into the
+    // plain view, which is the only permissive branch here (§7.3).
+    if (c.req.query('all') !== undefined) {
+      if (principal.kind !== 'human') throw forbidden('only a human may read every instruction');
+      return ok(
+        c,
+        allControlPage(
+          db,
+          Math.trunc(intQuery(c, 'since') ?? 0),
+          Math.trunc(clamp(intQuery(c, 'limit') ?? 50, 1, 200)),
+          c.req.query('from_id') || undefined,
+          c.req.query('to') || undefined,
+        ),
+      );
+    }
+
     const fromId = principalId(principal);
     const since = Math.trunc(intQuery(c, 'since') ?? 0);
     const limit = Math.trunc(clamp(intQuery(c, 'limit') ?? 50, 1, 200));
@@ -145,11 +225,7 @@ export function registerControlRoutes(app: Hono<AppEnv>, ctx: AppContext): void 
       seq: Number(control.seq),
       id: control.id,
       to: JSON.parse(control.to_json) as unknown,
-      receipts: receiptsFor(db, Number(control.seq)).map((receipt) => ({
-        to_id: receipt.to_id,
-        state: receipt.state,
-        delivered_at: receipt.delivered_at,
-      })),
+      receipts: receiptViews(db, Number(control.seq)),
       created_at: Number(control.created_at),
     }));
 
