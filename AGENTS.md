@@ -50,6 +50,7 @@ Both may read `docs/**`, `package.json`, and this file. The 15 endpoints, reques
 - Commits are made **unsigned**: this repository has `commit.gpgsign=false` and `tag.gpgsign=false` locally. Always commit as `git commit --no-gpg-sign -m "..."` so it stays explicit; never add `-S`.
 - One commit per task. Message: `area: what changed` (for example `src: poll cursor and gap folding`).
 - Do not rebase, amend, or force-push. Do not commit `node_modules/` or `.data/`.
+- Commit only the paths you own: `git add src/` or `git add test/`. **Never** `git add -A` or `git add .` while another worker is writing in the same tree — it will sweep their half-finished files into your commit.
 
 ## Behaviour
 
