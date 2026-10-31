@@ -19,6 +19,7 @@ Documents are Chinese. Code, comments, commit messages, test names, and anything
 - `npm run serve` → `node src/main.ts`
   - Listens on `PORT` (default `7717`).
   - Data directory from `PIGROUPS_DATA` (default `./.data`), created if missing.
+  - The database file is `<PIGROUPS_DATA>/pigroups.db` — pinned by `docs/设计说明.md` §11, so a test may read it directly.
   - Prints exactly one line to stdout when it is ready to accept requests: `listening on <port>`
   - On `SIGTERM` / `SIGINT`: stop accepting, close the DB, exit `0`.
   - `PIGROUPS_ADMIN_TOKEN`, when set, is read from the environment. `POST /v1/humans` requires it
