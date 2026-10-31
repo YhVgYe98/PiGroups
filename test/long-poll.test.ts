@@ -77,7 +77,7 @@ test('a hanging poll wakes with sys.terminated when a delete terminates the memb
   assert.equal(reply.body.items[0].from_id, 'sys', 'the notice comes from the platform');
 });
 
-test('a second poll while one is hanging is 409 poll_in_progress', async () => {
+test('a second poll while one is hanging is 409 poll_in_progress carrying Retry-After: 1, and a non-retryable 409 carries none', async () => {
   const owner = await spawnMember(server, root, 'single-owner');
   const child = await spawnMember(server, owner, 'single-child');
 
@@ -91,10 +91,25 @@ test('a second poll while one is hanging is 409 poll_in_progress', async () => {
   const second = await call(server, 'GET', '/v1/poll', { token: child.token, query: { wait: 0 } });
   assertStatus(second, 409, 'a second poll from the member that already has one hanging');
   assertErrorCode(second, 'poll_in_progress', 'a second poll from the member that already has one hanging');
+  assert.equal(
+    second.headers['retry-after'],
+    '1',
+    'poll_in_progress tells the adapter to retry after one second',
+  );
 
   await sendMessage(server, owner, groupConversation(owner.id), 'release the hanging poll');
   const released = await hanging;
   assertStatus(released, 200, 'the first poll still completes normally after the 409');
+
+  // The retry hint belongs to poll_in_progress alone; another 409 must not carry it.
+  const rootDelete = await call(server, 'DELETE', `/v1/members/${root.id}`, { token: root.token });
+  assertStatus(rootDelete, 409, 'DELETE of the root');
+  assertErrorCode(rootDelete, 'root_protected', 'DELETE of the root');
+  assert.equal(
+    rootDelete.headers['retry-after'],
+    undefined,
+    'root_protected is not retryable, so it carries no Retry-After',
+  );
 });
 
 test('poll clamps limit:999 and wait:-1 instead of rejecting them, and rejects an unknown types value', async () => {

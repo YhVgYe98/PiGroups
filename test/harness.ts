@@ -32,7 +32,13 @@ export type Server = {
 
 export type Principal = { id: string; token: string; name: string };
 
-export type Reply = { status: number; body: Json; text: string };
+export type Reply = {
+  status: number;
+  /** Response headers keyed by their lower-cased name, as fetch reports them. */
+  headers: Record<string, string>;
+  body: Json;
+  text: string;
+};
 
 export type CallOptions = {
   token?: string;
@@ -189,11 +195,11 @@ export async function call(
     if (value !== undefined) url.searchParams.set(key, String(value));
   }
 
-  const headers: Record<string, string> = {};
-  const init: RequestInit = { method, headers };
-  if (options.token !== undefined) headers.authorization = `Bearer ${options.token}`;
+  const requestHeaders: Record<string, string> = {};
+  const init: RequestInit = { method, headers: requestHeaders };
+  if (options.token !== undefined) requestHeaders.authorization = `Bearer ${options.token}`;
   if (options.body !== undefined) {
-    headers['content-type'] = 'application/json';
+    requestHeaders['content-type'] = 'application/json';
     init.body = JSON.stringify(options.body);
   }
   if (options.timeoutMs !== undefined) init.signal = AbortSignal.timeout(options.timeoutMs);
@@ -208,7 +214,7 @@ export async function call(
       body = text;
     }
   }
-  return { status: response.status, body, text };
+  return { status: response.status, headers: Object.fromEntries(response.headers.entries()), body, text };
 }
 
 export function assertStatus(reply: Reply, expected: number, what: string): void {
