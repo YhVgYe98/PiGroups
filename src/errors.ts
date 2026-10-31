@@ -3,13 +3,22 @@ export class ApiError extends Error {
   status: number;
   code: string;
   detail: Record<string, unknown>;
+  /** Extra response headers; only the errors that need one ever set it (§6.6). */
+  headers: Record<string, string>;
 
-  constructor(status: number, code: string, message: string, detail: Record<string, unknown> = {}) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    detail: Record<string, unknown> = {},
+    headers: Record<string, string> = {},
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.detail = detail;
+    this.headers = headers;
   }
 }
 
@@ -42,7 +51,9 @@ export function noSuchGroup(ownerId: string): ApiError {
 }
 
 export function pollInProgress(): ApiError {
-  return new ApiError(409, 'poll_in_progress', 'this member already has a poll waiting');
+  return new ApiError(409, 'poll_in_progress', 'this member already has a poll waiting', {}, {
+    'Retry-After': '1',
+  });
 }
 
 export function nameTaken(name: string): ApiError {

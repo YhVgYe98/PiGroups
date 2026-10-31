@@ -14,7 +14,6 @@ import {
   parseDmConv,
   peerOf,
   senderName,
-  unreadCount,
 } from './store.ts';
 
 export interface MemberView {
@@ -69,30 +68,27 @@ export interface ConversationItem {
   label: string;
   owner?: string;
   peer?: string;
-  unread: number | null;
   last_message_seq: number;
   last_at: number | null;
 }
 
-function groupConversation(db: DatabaseSync, owner: MemberRow, unread: number | null): ConversationItem {
+function groupConversation(db: DatabaseSync, owner: MemberRow): ConversationItem {
   return {
     to: `g:${owner.id}`,
     kind: 'group',
     label: owner.name,
     owner: owner.id,
-    unread,
     last_message_seq: conversationLastSeq(db, `g:${owner.id}`),
     last_at: conversationLastAt(db, `g:${owner.id}`),
   };
 }
 
-function dmConversation(db: DatabaseSync, convId: string, memberId: string, unread: number | null): ConversationItem {
+function dmConversation(db: DatabaseSync, convId: string, memberId: string): ConversationItem {
   const peer = peerOf(convId, memberId);
   const item: ConversationItem = {
     to: convId,
     kind: 'dm',
     label: peer !== undefined ? senderName(db, peer, 'member') : convId,
-    unread,
     last_message_seq: conversationLastSeq(db, convId),
     last_at: conversationLastAt(db, convId),
   };
@@ -109,7 +105,7 @@ function sortConversations(items: ConversationItem[]): ConversationItem[] {
   });
 }
 
-/** `GET /v1/conversations` (§10.4). A human reads everything, with no unread. */
+/** `GET /v1/conversations` (§10.4). Unread is not the platform's: each client keeps its own (§10.4). */
 export function conversationItems(db: DatabaseSync, principal: Principal): ConversationItem[] {
   if (principal.kind === 'human') {
     const items: ConversationItem[] = [];
@@ -121,7 +117,7 @@ export function conversationItems(db: DatabaseSync, principal: Principal): Conve
          ORDER BY o.created_at, o.id`,
       )
       .all() as unknown as MemberRow[];
-    for (const owner of owners) items.push(groupConversation(db, owner, null));
+    for (const owner of owners) items.push(groupConversation(db, owner));
     for (const convId of allDmConvIds(db)) {
       const parsed = parseDmConv(convId);
       if (!parsed) continue;
@@ -130,7 +126,6 @@ export function conversationItems(db: DatabaseSync, principal: Principal): Conve
         to: convId,
         kind: 'dm',
         label,
-        unread: null,
         last_message_seq: conversationLastSeq(db, convId),
         last_at: conversationLastAt(db, convId),
       });
@@ -141,16 +136,16 @@ export function conversationItems(db: DatabaseSync, principal: Principal): Conve
   const member = principal.member;
   const items: ConversationItem[] = [];
   if (hasLiveChildren(db, member.id)) {
-    items.push(groupConversation(db, member, unreadCount(db, member.id, `g:${member.id}`)));
+    items.push(groupConversation(db, member));
   }
   if (member.parent_id !== null) {
     const parent = getMember(db, member.parent_id);
     if (parent && parent.status === 'alive' && hasLiveChildren(db, parent.id)) {
-      items.push(groupConversation(db, parent, unreadCount(db, member.id, `g:${parent.id}`)));
+      items.push(groupConversation(db, parent));
     }
   }
   for (const convId of dmConvIdsOf(db, member.id)) {
-    items.push(dmConversation(db, convId, member.id, unreadCount(db, member.id, convId)));
+    items.push(dmConversation(db, convId, member.id));
   }
   return sortConversations(items);
 }

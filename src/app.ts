@@ -40,6 +40,7 @@ export function createApp(options: { db: DatabaseSync; startedAt: number }): Hon
           server_version: SERVER_VERSION,
         },
         error.status as ContentfulStatusCode,
+        error.headers,
       );
     }
     console.error('[pigroups] unhandled error:', error);

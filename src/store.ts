@@ -245,15 +245,6 @@ export function memberCursor(db: DatabaseSync, memberId: string): number {
   return found ? Number(found.last_seq) : 0;
 }
 
-export function unreadCount(db: DatabaseSync, memberId: string, convId: string): number {
-  const found = row<{ n: number }>(
-    db
-      .prepare('SELECT COUNT(*) AS n FROM inbox WHERE member_id = ? AND conv_id = ? AND seq > ?')
-      .get(memberId, convId, memberCursor(db, memberId)),
-  );
-  return found ? Number(found.n) : 0;
-}
-
 export function pendingReceiptCount(db: DatabaseSync, memberId: string): number {
   const found = row<{ n: number }>(
     db.prepare("SELECT COUNT(*) AS n FROM control_receipts WHERE to_id = ? AND state = 'pending'").get(memberId),
