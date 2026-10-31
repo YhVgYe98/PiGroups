@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
   assertOk,
+  assertStatus,
   bootstrapRoot,
   call,
   poll,
@@ -60,3 +62,47 @@ test('conversation seqs and the consume cursor survive a restart on the same dat
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test('the storage layer enforces one name for the whole members table, deleted members included', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'pigroups-name-index-'));
+  let server: Server | undefined;
+  try {
+    server = await startServer({ dataDir });
+    const root = await bootstrapRoot(server);
+    const child = await spawnMember(server, root, 'dup');
+    const deleted = await call(server, 'DELETE', `/v1/members/${child.id}`, { token: root.token });
+    assertStatus(deleted, 200, `DELETE /v1/members/${child.id} for the name dup`);
+
+    await server.stop();
+    server = undefined;
+
+    const db = new DatabaseSync(join(dataDir, 'pigroups.db'), { readOnly: true });
+    try {
+      const indexes = db.prepare("PRAGMA index_list('members')").all() as any[];
+      const nameIndexes = indexes.filter((index) => index.unique === 1 && indexColumnsOf(db, index.name).includes('name'));
+      assert.equal(nameIndexes.length, 1, 'members(name) carries exactly one unique index');
+      const nameIndex = nameIndexes[0];
+      assert.deepEqual(
+        indexColumnsOf(db, nameIndex.name),
+        ['name'],
+        'the unique index is on name alone, not on (name, status)',
+      );
+      assert.equal(
+        nameIndex.partial,
+        0,
+        "the unique index is not partial: a deleted member's name stays reserved",
+      );
+    } finally {
+      db.close();
+    }
+  } finally {
+    if (server) await server.stop();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+/** `PRAGMA index_info(<index>)` yields one row per indexed column, in index order. */
+function indexColumnsOf(db: DatabaseSync, indexName: string): string[] {
+  const rows = db.prepare(`PRAGMA index_info('${indexName}')`).all() as any[];
+  return rows.map((row) => String(row.name));
+}
