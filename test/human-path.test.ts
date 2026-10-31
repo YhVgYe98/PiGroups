@@ -2,7 +2,10 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  ADMIN_TOKEN,
+  assertErrorCode,
   assertOk,
+  assertStatus,
   bootstrapRoot,
   call,
   createHuman,
@@ -74,4 +77,36 @@ test('a human can read a DM by its conversation id', async () => {
     'a human can read the history of any conversation',
   );
   assert.equal(read.body.items[0].sender_kind, 'member', 'the history keeps the sender kind of each message');
+});
+
+test('POST /v1/humans accepts only the admin token, never a member token', async () => {
+  const anonymous = await call(server, 'POST', '/v1/humans', { body: { name: 'human-gate-anonymous' } });
+  assertStatus(anonymous, 403, 'POST /v1/humans without an admin token');
+  assertErrorCode(anonymous, 'forbidden', 'POST /v1/humans without an admin token');
+
+  const member = await spawnMember(server, root, 'human-gate-member');
+  const asMember = await call(server, 'POST', '/v1/humans', {
+    token: member.token,
+    body: { name: 'human-gate-from-member' },
+  });
+  assertStatus(asMember, 403, 'POST /v1/humans with a member token');
+  assertErrorCode(asMember, 'forbidden', 'POST /v1/humans with a member token');
+
+  const asAdmin = await call(server, 'POST', '/v1/humans', {
+    token: ADMIN_TOKEN,
+    body: { name: 'human-gate-from-admin' },
+  });
+  assertOk(asAdmin, 'POST /v1/humans with the admin token');
+  assert.equal(typeof asAdmin.body.token, 'string', 'the admin token creates a human and returns its token');
+});
+
+test('POST /v1/humans is disabled when PIGROUPS_ADMIN_TOKEN is not configured', async () => {
+  const bare = await startServer({ adminToken: false });
+  try {
+    const disabled = await call(bare, 'POST', '/v1/humans', { body: { name: 'human-gate-unconfigured' } });
+    assertStatus(disabled, 403, 'POST /v1/humans on a server without PIGROUPS_ADMIN_TOKEN');
+    assertErrorCode(disabled, 'forbidden', 'POST /v1/humans on a server without PIGROUPS_ADMIN_TOKEN');
+  } finally {
+    await bare.stop();
+  }
 });

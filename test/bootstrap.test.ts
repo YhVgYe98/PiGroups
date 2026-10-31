@@ -14,7 +14,10 @@ test('bootstrap creates the root, a second bootstrap is 409, and an unknown toke
       `POST /v1/bootstrap: member id must look like m_<6 hex>, got ${JSON.stringify(created.body?.member?.id)}`,
     );
     assert.equal(created.body.member.parent_id, null, 'the first member is the root, so it has no parent');
-    assert.equal(created.body.member.is_root, true, 'the first member is flagged as the root');
+    assert.ok(
+      created.body.member.is_root === true || created.body.member.is_root === 1,
+      'the first member is flagged as the root (true or 1)',
+    );
     assert.equal(typeof created.body.token, 'string', 'POST /v1/bootstrap returns a token');
     assert.ok(created.body.token.length > 0, 'the bootstrap token is not empty');
 

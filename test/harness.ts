@@ -19,6 +19,9 @@ const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const READY_TIMEOUT_MS = 20_000;
 const STOP_TIMEOUT_MS = 5_000;
 
+/** `POST /v1/humans` needs PIGROUPS_ADMIN_TOKEN in the environment and on the request. */
+export const ADMIN_TOKEN = 'pigroups-test-admin-token';
+
 export type Json = any;
 
 export type Server = {
@@ -69,6 +72,18 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   });
 }
 
+function spawnedEnv(port: number, dataDir: string, adminToken: string | false | undefined): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PORT: String(port),
+    PIGROUPS_DATA: dataDir,
+    PIGROUPS_ADMIN_TOKEN: ADMIN_TOKEN,
+  };
+  if (adminToken === false) delete env.PIGROUPS_ADMIN_TOKEN;
+  else if (typeof adminToken === 'string') env.PIGROUPS_ADMIN_TOKEN = adminToken;
+  return env;
+}
+
 async function shutdown(child: ChildProcess): Promise<void> {
   if (child.pid === undefined) return;
   if (child.exitCode !== null || child.signalCode !== null) return;
@@ -81,6 +96,8 @@ async function shutdown(child: ChildProcess): Promise<void> {
 export type StartOptions = {
   /** Reuse an existing data directory; stop() then leaves it in place for a restart. */
   dataDir?: string;
+  /** Override the admin token the server is started with; false leaves it unset. */
+  adminToken?: string | false;
 };
 
 /** Spawn the server, resolve once it prints `listening on <port>`, else fail loudly. */
@@ -91,7 +108,7 @@ export async function startServer(options: StartOptions = {}): Promise<Server> {
   if (!ownsDataDir) await mkdir(dataDir, { recursive: true });
   const child = spawn(process.execPath, ['src/main.ts'], {
     cwd: REPO_ROOT,
-    env: { ...process.env, PORT: String(port), PIGROUPS_DATA: dataDir },
+    env: spawnedEnv(port, dataDir, options.adminToken),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -240,7 +257,7 @@ export async function spawnMember(server: Server, parent: Principal, name: strin
 }
 
 export async function createHuman(server: Server, name: string): Promise<Principal> {
-  const reply = await call(server, 'POST', '/v1/humans', { body: { name } });
+  const reply = await call(server, 'POST', '/v1/humans', { token: ADMIN_TOKEN, body: { name } });
   assertOk(reply, 'POST /v1/humans');
   return { id: reply.body.human.id, token: reply.body.token, name: reply.body.human.name };
 }

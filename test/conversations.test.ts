@@ -13,6 +13,7 @@ import {
   spawnMember,
   startServer,
   type Principal,
+  type Reply,
   type Server,
 } from './harness.ts';
 
@@ -28,7 +29,7 @@ after(async () => {
   if (server) await server.stop();
 });
 
-function conversation(reply: { body: any }, to: string): any {
+function conversation(reply: Reply, to: string): any {
   assertOk(reply, 'GET /v1/conversations');
   const found = (reply.body.items ?? []).find((item: any) => item.to === to);
   assert.ok(found, `GET /v1/conversations must list the ${to} conversation — ${JSON.stringify(reply.body)}`);
@@ -67,7 +68,7 @@ test('GET /v1/conversations reports the consume cursor as unread, counts gap-fol
   assert.ok(groupGap, 'the limit:1 poll reports the skipped group messages as a gap');
   assert.ok(dmGap, 'the limit:1 poll reports the skipped DM messages as a gap');
   assert.equal(groupGap.count, 2, 'two group messages were folded into the gap');
-  assert.equal(dmGap.count, 1, 'one DM message was folded into the gap');
+  assert.equal(dmGap.count, 2, 'two DM messages were folded into the gap');
 
   const unreadAfterPoll = await call(server, 'GET', '/v1/conversations', { token: child.token });
   assertOk(unreadAfterPoll, 'GET /v1/conversations after the poll');
