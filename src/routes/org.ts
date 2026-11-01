@@ -102,7 +102,11 @@ export function registerOrgRoutes(app: Hono<AppEnv>, ctx: AppContext): void {
       // 2. One termination notice per node, sent as the platform itself.
       for (const nodeId of alive) {
         const payload = JSON.stringify({ reason: 'deleted', terminated_by: caller.id });
-        const info = insertControl.run(`terminate:${nodeId}`, nodeId, payload, createdAt);
+        // `to_json` holds JSON, like every other control (control.ts writes
+        // `JSON.stringify(to)`); a bare id here makes the read side's `JSON.parse`
+        // throw, and a human's audit of controls then 500s for as long as the row
+        // survives — a delete breaks the log that would explain the delete.
+        const info = insertControl.run(`terminate:${nodeId}`, JSON.stringify(nodeId), payload, createdAt);
         insertReceipt.run(Number(info.lastInsertRowid), nodeId);
       }
 

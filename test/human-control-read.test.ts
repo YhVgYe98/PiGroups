@@ -185,3 +185,25 @@ test('the sender\'s own view still hides cmd and payload, and the receiver\'s vi
     'the payload appears nowhere in the receiver\'s raw response',
   );
 });
+
+test('a human still reads the whole control log after a member was deleted', async () => {
+  const owner = await spawnMember(server, root, 'after-delete-owner');
+  const doomed = await spawnMember(server, owner, 'after-delete-child');
+  const human = await createHuman(server, 'after-delete-human');
+
+  // The delete writes a `sys.terminated` notice per node. That row goes through the
+  // same table as every other instruction, so a malformed `to` there does not fail the
+  // delete — it fails the human's audit, which is the record of the delete itself.
+  const removed = await call(server, 'DELETE', `/v1/members/${doomed.id}`, { token: owner.token });
+  assertStatus(removed, 200, 'DELETE /v1/members/{id}');
+
+  const all = await readAll(server, human, { since: 0 });
+  assertStatus(all, 200, 'GET /v1/control?all=true after a delete');
+
+  const notice = all.body.items.find(
+    (item: any) => item.cmd === 'sys.terminated' && item.to === doomed.id,
+  );
+  assert.ok(notice, 'the termination notice is readable, with the target as a plain id');
+  assert.equal(notice.from_id, 'sys', 'the platform itself is the sender of the notice');
+  assert.deepEqual(notice.payload, { reason: 'deleted', terminated_by: owner.id });
+});
