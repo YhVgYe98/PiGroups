@@ -37,3 +37,25 @@ test('GET /v1/health reports the same version as package.json', async () => {
     await server.stop();
   }
 });
+
+/**
+ * The lockfile is generated, so it drifts the moment someone bumps `package.json` by
+ * hand and forgets to regenerate it. It carries the same number in two places
+ * (`version` and `packages[""].version`), and a stale one is the kind of thing that
+ * only shows up when a release is published from it.
+ */
+test('package-lock.json carries the same version as package.json', async () => {
+  const manifest = JSON.parse(await readFile(PACKAGE_JSON, 'utf8')) as PackageManifest;
+  const lockPath = fileURLToPath(new URL('../package-lock.json', import.meta.url));
+  const lock = JSON.parse(await readFile(lockPath, 'utf8')) as {
+    version?: string;
+    packages?: Record<string, { version?: string }>;
+  };
+
+  assert.equal(lock.version, manifest.version, 'the lockfile root version must follow package.json');
+  assert.equal(
+    lock.packages?.['']?.version,
+    manifest.version,
+    'the lockfile package entry must follow package.json too',
+  );
+});
