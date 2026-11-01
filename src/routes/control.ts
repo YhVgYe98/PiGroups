@@ -32,6 +32,22 @@ function receiptViews(db: DatabaseSync, controlSeq: number) {
 type ControlPage = { items: unknown[]; next: number | null };
 
 /**
+ * `to_json` holds JSON for every control written since §7.3. A row written by an
+ * older build's `sys.terminated` holds a bare member id instead (`m_635f7e`). The
+ * audit of a delete must not 500 on the row that explains the delete, so a value
+ * that is not JSON is returned as the text it is. `openDatabase` rewrites those
+ * rows once at startup; this is the belt to that migration's braces, and it also
+ * covers a row that reached the table by another writer.
+ */
+function parseStoredTo(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+/**
  * The full view of §7.3: every instruction across all senders and recipients,
  * `cmd` and `payload` included. Only a human reaches this, and only a human
  * token is the reason the content can be shown at all.
@@ -65,7 +81,7 @@ function allControlPage(
     seq: Number(control.seq),
     id: control.id,
     from_id: control.from_id,
-    to: JSON.parse(control.to_json) as unknown,
+    to: parseStoredTo(control.to_json),
     cmd: control.cmd,
     payload: control.payload_json === null ? null : (JSON.parse(control.payload_json) as unknown),
     reply_to: control.reply_to,
@@ -224,7 +240,7 @@ export function registerControlRoutes(app: Hono<AppEnv>, ctx: AppContext): void 
     const items = found.map((control) => ({
       seq: Number(control.seq),
       id: control.id,
-      to: JSON.parse(control.to_json) as unknown,
+      to: parseStoredTo(control.to_json),
       receipts: receiptViews(db, Number(control.seq)),
       created_at: Number(control.created_at),
     }));

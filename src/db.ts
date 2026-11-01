@@ -105,7 +105,20 @@ export function openDatabase(dataDir: string): DatabaseSync {
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(SCHEMA);
+  backfillControlTargets(db);
   return db;
+}
+
+/**
+ * Before e03af1a, `sys.terminated` wrote the target member id into `to_json` as a
+ * bare string while every other control wrote JSON. The readers now tolerate that
+ * (`routes/control.ts`), but `GET /v1/control?to=` compares `to_json` with the JSON
+ * form, so a legacy row would silently vanish from that filter. Rewrite them once,
+ * at open: idempotent (`json_valid` is 0 only for the non-JSON rows) and bounded by
+ * the size of the legacy set.
+ */
+function backfillControlTargets(db: DatabaseSync): void {
+  db.exec("UPDATE controls SET to_json = json_quote(to_json) WHERE json_valid(to_json) = 0");
 }
 
 /**
