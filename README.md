@@ -17,3 +17,5 @@ npm run typecheck
 `AGENTS.md` holds the working rules: file ownership, the runtime contract, and
 the isolation rule that the implementation and the test suite are written and
 reviewed without either side seeing the other.
+
+The Pi adapter and the project handoff live in `../pigroups-adapter` (see its `docs/handoff.md`).
