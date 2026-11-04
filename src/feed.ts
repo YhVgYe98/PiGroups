@@ -36,7 +36,7 @@ export interface MessageItem {
   from_id: string;
   from_name: string;
   from_kind: string;
-  preview: string;
+  body: string;
   mentions_me: boolean;
   from_parent: boolean;
   at: number;
@@ -82,14 +82,6 @@ export function waitForWake(hub: PollHub, memberId: string, timeoutMs: number): 
     const timer = setTimeout(done, Math.max(0, timeoutMs));
     hub.waiters.set(memberId, done);
   });
-}
-
-const PREVIEW_LENGTH = 200;
-
-/** 200 code points, so a surrogate pair is never split (§6.3). */
-function preview(body: string): string {
-  if (body.length <= PREVIEW_LENGTH) return body;
-  return Array.from(body).slice(0, PREVIEW_LENGTH).join('');
 }
 
 function parseJson(text: string | null): unknown {
@@ -191,7 +183,7 @@ function messageItem(
     from_id: detail.sender_id,
     from_name: senderName(db, detail.sender_id, detail.sender_kind),
     from_kind: detail.sender_kind,
-    preview: preview(detail.body),
+    body: detail.body,
     mentions_me: mentionExists(db, entry.conv_id, Number(entry.msg_seq), memberId),
     from_parent: parentId !== null && detail.sender_id === parentId,
     at: Number(detail.created_at),

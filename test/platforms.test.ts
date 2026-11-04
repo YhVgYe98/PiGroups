@@ -190,14 +190,14 @@ test('two platforms under one data root keep separate trees, messages, tokens an
     const firstBatch = await poll(first, firstChild);
     const firstMessages = firstBatch.items.filter((item: any) => item.kind === 'message');
     assert.equal(firstMessages.length, 1, 'the first child gets exactly its own message');
-    assert.match(String(firstMessages[0].preview), /first-platform-only/);
-    assert.doesNotMatch(String(firstMessages[0].preview), /second-platform-only/);
+    assert.match(String(firstMessages[0].body), /first-platform-only/);
+    assert.doesNotMatch(String(firstMessages[0].body), /second-platform-only/);
 
     const secondBatch = await poll(second, secondChild);
     const secondMessages = secondBatch.items.filter((item: any) => item.kind === 'message');
     assert.equal(secondMessages.length, 1, 'the second child gets exactly its own message');
-    assert.match(String(secondMessages[0].preview), /second-platform-only/);
-    assert.doesNotMatch(String(secondMessages[0].preview), /first-platform-only/);
+    assert.match(String(secondMessages[0].body), /second-platform-only/);
+    assert.doesNotMatch(String(secondMessages[0].body), /first-platform-only/);
 
     // Reading history on one platform must not reveal the other platform's row.
     const history = await call(first, 'GET', '/v1/messages', {

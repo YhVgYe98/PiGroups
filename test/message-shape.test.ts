@@ -28,7 +28,7 @@ after(async () => {
   if (server) await server.stop();
 });
 
-test('from_parent is true for the parent and false for a sibling or a human, and preview never exceeds 200 characters', async () => {
+test('from_parent is true for the parent and false for a sibling or a human, and a 500 character body comes back whole', async () => {
   const owner = await spawnMember(server, root, 'shape-owner');
   const child = await spawnMember(server, owner, 'shape-child');
   const sibling = await spawnMember(server, owner, 'shape-sibling');
@@ -63,12 +63,39 @@ test('from_parent is true for the parent and false for a sibling or a human, and
   );
   assert.ok(humanItem, 'the child receives the human message posted to its group');
   assert.equal(humanItem.from_parent, false, 'a human is nobody\'s parent, so from_parent is false');
-  assert.equal(typeof humanItem.preview, 'string', 'a polled message carries a preview string');
+  assert.equal(typeof humanItem.body, 'string', 'a polled message carries its body as a string');
+  assert.equal(humanItem.body, longBody, 'a 500 character body is delivered whole, not truncated');
+});
+
+test('a 60000 character body sent by a member comes back from the poll byte-identical to the stored body', async () => {
+  const owner = await spawnMember(server, root, 'long-body-owner');
+  const child = await spawnMember(server, owner, 'long-body-child');
+
+  // 29 ASCII code points and one CJK code point per unit: 60000 characters,
+  // 64000 UTF-8 bytes, so the fixture is large but stays under the 64 KiB write limit.
+  const body = 'abcdefghijklmnopqrstuvwxyz012\u4e2d'.repeat(2000);
+  assert.equal(Array.from(body).length, 60000, 'the fixture is 60000 characters');
+  assert.ok(new TextEncoder().encode(body).length <= 64 * 1024, 'the fixture fits the write limit');
+
+  const sent = await sendMessage(server, owner, child.id, body);
+
+  const history = await call(server, 'GET', '/v1/messages', {
+    token: child.token,
+    query: { to: dmConversation(owner.id, child.id) },
+  });
+  assertOk(history, 'GET /v1/messages for the long body');
+  const stored = history.body.items.find((item: any) => item.seq === sent.seq);
+  assert.ok(stored, 'the long message is stored in the conversation history');
+  assert.equal(stored.body, body, 'the stored body is the body that was sent');
+
+  const batch = await poll(server, child);
+  const polled = batch.items.find((item: any) => item.kind === 'message' && item.seq === sent.seq);
+  assert.ok(polled, 'the long message is delivered by the poll');
+  assert.equal(polled.body, stored.body, 'the poll returns the stored body, not a shortened copy');
   assert.ok(
-    humanItem.preview.length <= 200,
-    `preview is capped at 200 characters, got ${humanItem.preview.length}`,
+    Buffer.from(polled.body, 'utf8').equals(Buffer.from(body, 'utf8')),
+    'the polled body is byte-identical to what was sent',
   );
-  assert.ok(humanItem.preview.length > 0, 'the preview is not empty for a 500 character body');
 });
 
 test('mentions ["all"] is the @all wire form and marks every current member of the group', async () => {

@@ -1,9 +1,11 @@
 {
   "name": "pigroups",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "serve": "node src/main.ts",
     "test": "node --test test/*.test.ts",
