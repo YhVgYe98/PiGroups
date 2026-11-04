@@ -9,13 +9,17 @@
 
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url));
+/** Absolute path, so a server can be started from any working directory. */
+const ENTRY_POINT = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const READY_TIMEOUT_MS = 20_000;
 const STOP_TIMEOUT_MS = 5_000;
 
@@ -24,10 +28,20 @@ export const ADMIN_TOKEN = 'pigroups-test-admin-token';
 
 export type Json = any;
 
+export type ExitStatus = { code: number | null; signal: NodeJS.Signals | null };
+
+export type ExitResult = ExitStatus & { stdout: string; stderr: string };
+
 export type Server = {
   port: number;
   baseUrl: string;
-  stop: () => Promise<void>;
+  /** The data root the server was started with (a temporary one when none was given). */
+  dataDir: string;
+  /** Everything the process has written to stdout so far. */
+  stdout: () => string;
+  /** Everything the process has written to stderr so far. */
+  stderr: () => string;
+  stop: () => Promise<ExitStatus>;
 };
 
 export type Principal = { id: string; token: string; name: string };
@@ -78,25 +92,37 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   });
 }
 
-function spawnedEnv(port: number, dataDir: string, adminToken: string | false | undefined): NodeJS.ProcessEnv {
+function spawnedEnv(
+  port: number,
+  dataDir: string,
+  adminToken: string | false | undefined,
+  platformId: string | undefined,
+  omitDataDir: boolean,
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PORT: String(port),
-    PIGROUPS_DATA: dataDir,
     PIGROUPS_ADMIN_TOKEN: ADMIN_TOKEN,
   };
+  delete env.PIGROUPS_PLATFORM_ID;
+  delete env.PIGROUPS_DATA;
+  if (!omitDataDir) env.PIGROUPS_DATA = dataDir;
+  if (platformId !== undefined) env.PIGROUPS_PLATFORM_ID = platformId;
   if (adminToken === false) delete env.PIGROUPS_ADMIN_TOKEN;
   else if (typeof adminToken === 'string') env.PIGROUPS_ADMIN_TOKEN = adminToken;
   return env;
 }
 
-async function shutdown(child: ChildProcess): Promise<void> {
-  if (child.pid === undefined) return;
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill('SIGTERM');
-  if (await waitForExit(child, STOP_TIMEOUT_MS)) return;
-  child.kill('SIGKILL');
-  await waitForExit(child, STOP_TIMEOUT_MS);
+async function shutdown(child: ChildProcess): Promise<ExitStatus> {
+  if (child.pid === undefined) return { code: null, signal: null };
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill('SIGTERM');
+    if (!(await waitForExit(child, STOP_TIMEOUT_MS))) {
+      child.kill('SIGKILL');
+      await waitForExit(child, STOP_TIMEOUT_MS);
+    }
+  }
+  return { code: child.exitCode, signal: child.signalCode };
 }
 
 export type StartOptions = {
@@ -104,17 +130,54 @@ export type StartOptions = {
   dataDir?: string;
   /** Override the admin token the server is started with; false leaves it unset. */
   adminToken?: string | false;
+  /** Select a platform under <dataDir>/platforms instead of letting the server choose one. */
+  platformId?: string;
+  /** Working directory for the process; also implies the caller cleans up after itself. */
+  cwd?: string;
+  /** Leave PIGROUPS_DATA unset, so the default data root under `cwd` is used. */
+  omitDataDir?: boolean;
+  /** Do not pre-create the data directory; the server is expected to create it. */
+  createDataDir?: boolean;
 };
 
-/** Spawn the server, resolve once it prints `listening on <port>`, else fail loudly. */
+/**
+ * Spawn the server, resolve once it prints `listening on <port>`, else fail loudly.
+ * A port can be taken between `findFreePort` and the child's bind; that is a
+ * scheduling accident, so it is retried instead of failing a whole test file.
+ */
 export async function startServer(options: StartOptions = {}): Promise<Server> {
-  const port = await findFreePort();
-  const ownsDataDir = options.dataDir === undefined;
-  const dataDir = options.dataDir ?? (await mkdtemp(join(tmpdir(), 'pigroups-test-')));
-  if (!ownsDataDir) await mkdir(dataDir, { recursive: true });
-  const child = spawn(process.execPath, ['src/main.ts'], {
-    cwd: REPO_ROOT,
-    env: spawnedEnv(port, dataDir, options.adminToken),
+  const ownsDataDir = options.dataDir === undefined && options.cwd === undefined;
+  const cwd = options.cwd ?? REPO_ROOT;
+  const dataDir =
+    options.dataDir ??
+    (options.omitDataDir === true
+      ? join(cwd, '.pigroups')
+      : await mkdtemp(join(tmpdir(), 'pigroups-test-')));
+  if (!ownsDataDir && options.createDataDir !== false) await mkdir(dataDir, { recursive: true });
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const port = await findFreePort();
+    try {
+      return await spawnServer(port, options, { ownsDataDir, cwd, dataDir });
+    } catch (error) {
+      lastError = error;
+      if (!String(error).includes('EADDRINUSE') || attempt === 2) break;
+    }
+  }
+  if (ownsDataDir) await rm(dataDir, { recursive: true, force: true });
+  throw lastError;
+}
+
+async function spawnServer(
+  port: number,
+  options: StartOptions,
+  where: { ownsDataDir: boolean; cwd: string; dataDir: string },
+): Promise<Server> {
+  const { ownsDataDir, cwd, dataDir } = where;
+  const child = spawn(process.execPath, [ENTRY_POINT], {
+    cwd,
+    env: spawnedEnv(port, dataDir, options.adminToken, options.platformId, options.omitDataDir === true),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -169,19 +232,142 @@ export async function startServer(options: StartOptions = {}): Promise<Server> {
     scan();
   }).catch(async (error: unknown) => {
     await shutdown(child);
-    if (ownsDataDir) await rm(dataDir, { recursive: true, force: true });
     throw error;
   });
 
   let stopped = false;
-  const stop = async () => {
-    if (stopped) return;
+  const stop = async (): Promise<ExitStatus> => {
+    if (stopped) return { code: child.exitCode, signal: child.signalCode };
     stopped = true;
-    await shutdown(child);
+    const status = await shutdown(child);
     if (ownsDataDir) await rm(dataDir, { recursive: true, force: true });
+    return status;
   };
 
-  return { port, baseUrl: `http://127.0.0.1:${port}`, stop };
+  return {
+    port,
+    baseUrl: `http://127.0.0.1:${port}`,
+    dataDir,
+    stdout: () => output.stdout,
+    stderr: () => output.stderr,
+    stop,
+  };
+}
+
+export type RunToExitOptions = {
+  dataDir: string;
+  /** Select a platform explicitly; without it the environment variable is unset. */
+  platformId?: string;
+  /** Bind this port instead of allocating one (use with `holdPort` to force EADDRINUSE). */
+  port?: number;
+  /** Working directory for the process. */
+  cwd?: string;
+  /** Extra environment entries for this process only. */
+  env?: Record<string, string>;
+};
+
+/**
+ * Spawn the server and wait until it exits. A refusal must exit quickly; a
+ * server that starts instead is killed and reported as a failure.
+ */
+export async function runToExit(options: RunToExitOptions): Promise<ExitResult> {
+  const port = options.port ?? (await findFreePort());
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PORT: String(port),
+    PIGROUPS_DATA: options.dataDir,
+    ...options.env,
+  };
+  delete env.PIGROUPS_PLATFORM_ID;
+  if (options.platformId !== undefined) env.PIGROUPS_PLATFORM_ID = options.platformId;
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [ENTRY_POINT], {
+      cwd: options.cwd ?? REPO_ROOT,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    child.stdout!.setEncoding('utf8');
+    child.stderr!.setEncoding('utf8');
+    child.stdout!.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr!.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      reject(new Error(`server did not refuse to start\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`));
+    }, 10_000);
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('exit', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ code, signal, stdout, stderr });
+    });
+  });
+}
+
+/** Every directory under platform/, including leftovers that hold no database. */
+export async function platformDirs(dataRoot: string): Promise<string[]> {
+  try {
+    const entries = await readdir(join(dataRoot, 'platforms'), { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+export function databasePath(dataRoot: string, platformId: string): string {
+  return join(dataRoot, 'platforms', platformId, 'pigroups.db');
+}
+
+export function startLockPath(dataRoot: string): string {
+  return join(dataRoot, 'platforms', '.start.lock');
+}
+
+/** Write a startup lock by hand; a string is written verbatim, anything else as JSON. */
+export function writeStartLock(dataRoot: string, contents: unknown): string {
+  mkdirSync(join(dataRoot, 'platforms'), { recursive: true });
+  const lockPath = startLockPath(dataRoot);
+  writeFileSync(lockPath, typeof contents === 'string' ? contents : JSON.stringify(contents));
+  return lockPath;
+}
+
+/** A pid that is guaranteed not to be running, for a stale-lock fixture. */
+export function deadPid(): number {
+  for (let pid = 999_999; pid > 1000; pid--) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+    }
+  }
+  throw new Error('could not find a dead pid for the lock fixture');
+}
+
+export function metaRows(databasePathname: string): Record<string, string> {
+  const db = new DatabaseSync(databasePathname, { readOnly: true });
+  try {
+    const rows = db.prepare('SELECT key, value FROM meta').all() as Array<{ key: string; value: string }>;
+    return Object.fromEntries(rows.map((row) => [row.key, row.value]));
+  } finally {
+    db.close();
+  }
 }
 
 export async function call(
@@ -313,4 +499,22 @@ export async function poll(
   });
   assertStatus(reply, 200, `GET /v1/poll as ${principal.name}`);
   return reply.body;
+}
+
+/** A listening socket on a fixed port, so a server started next to it cannot bind. */
+export async function holdPort(): Promise<{ port: number; release: () => Promise<void> }> {
+  const holder = createServer();
+  await new Promise<void>((resolve, reject) => {
+    holder.once('error', reject);
+    holder.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = holder.address();
+  if (address === null || typeof address === 'string') {
+    await new Promise<void>((resolve) => holder.close(() => resolve()));
+    throw new Error('could not allocate a held TCP port');
+  }
+  return {
+    port: address.port,
+    release: () => new Promise<void>((resolve) => holder.close(() => resolve())),
+  };
 }

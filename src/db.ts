@@ -1,6 +1,17 @@
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { SERVER_VERSION } from './version.ts';
+
+const IDENTITY_MISMATCH = 'PlatformIdMismatch';
+
+export interface OpenDatabaseOptions {
+  /**
+   * An explicit platform selected by the caller. It is written when the database
+   * is created; on an existing database it must match `meta.platform_id`.
+   */
+  platformId?: string;
+}
 
 /**
  * The schema of `docs/设计说明.md` §4. There is no `groups` table (a group is a
@@ -97,16 +108,116 @@ CREATE TABLE IF NOT EXISTS control_receipts (
   PRIMARY KEY (control_seq, to_id)
 );
 CREATE INDEX IF NOT EXISTS ix_receipts_pending ON control_receipts(to_id, state);
+
+CREATE TABLE IF NOT EXISTS meta (
+  key           TEXT PRIMARY KEY,
+  value         TEXT NOT NULL
+);
 `;
 
-export function openDatabase(dataDir: string): DatabaseSync {
+
+/**
+ * Opens the SQLite file inside one platform directory. The directory itself is
+ * chosen by `resolvePlatform`; this function only knows where the file lives.
+ */
+export function openDatabase(dataDir: string, options: OpenDatabaseOptions = {}): DatabaseSync {
   mkdirSync(dataDir, { recursive: true });
-  const db = new DatabaseSync(join(dataDir, 'pigroups.db'), { timeout: 5000 });
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA foreign_keys = ON');
-  db.exec(SCHEMA);
-  backfillControlTargets(db);
+  const dbPath = join(dataDir, 'pigroups.db');
+  let db: DatabaseSync;
+  try {
+    db = new DatabaseSync(dbPath, { timeout: 5000 });
+  } catch (error) {
+    throw openFailure(error, dbPath);
+  }
+
+  // Identity is checked before anything is written: a refused open must not
+  // leave a `-wal`, a schema, or a `meta` row in another platform's database.
+  try {
+    assertStoredIdentity(db, options.platformId, dataDir);
+  } catch (error) {
+    closeQuietly(db);
+    throw error instanceof Error && error.name === IDENTITY_MISMATCH ? error : openFailure(error, dbPath);
+  }
+
+  try {
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec(SCHEMA);
+    writeMeta(db, options.platformId, dataDir);
+    backfillControlTargets(db);
+  } catch (error) {
+    closeQuietly(db);
+    throw openFailure(error, dbPath);
+  }
   return db;
+}
+
+/** A bare `file is not a database` is useless inside a data root that holds several of them. */
+function openFailure(error: unknown, dbPath: string): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(`cannot open ${dbPath}: ${message}`);
+}
+
+function closeQuietly(db: DatabaseSync): void {
+  try {
+    db.close();
+  } catch {
+    // The open failure is the error worth reporting.
+  }
+}
+
+/**
+ * `platform_id` is written once, when the database is created; afterwards the
+ * stored value wins. An explicit request for a different id means the caller
+ * opened another platform's database, so it is a conflict rather than a rename.
+ *
+ * The remedy in the message is deliberate: starting with the stored id on the
+ * renamed directory would create a *new* platform next to the old one and turn
+ * the data root into an ambiguous one, hiding the real data for good.
+ */
+function assertStoredIdentity(
+  db: DatabaseSync,
+  requestedPlatformId: string | undefined,
+  dataDir: string,
+): void {
+  const hasMeta = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'")
+    .get() as { name: string } | undefined;
+  if (hasMeta === undefined) return;
+
+  const stored = db.prepare("SELECT value FROM meta WHERE key = 'platform_id'").get() as
+    | { value: string }
+    | undefined;
+  if (stored === undefined) return;
+  if (requestedPlatformId === undefined || requestedPlatformId === stored.value) return;
+
+  const directoryName = basename(resolve(dataDir));
+  const mismatch = new Error(
+    `platform id mismatch: the directory name is ${directoryName}, the database stores ${stored.value}; ` +
+      'the database identity wins and they must match. ' +
+      'An existing database is never renamed: rename the directory back to ' +
+      `${stored.value}, or use a different data directory.`,
+  );
+  mismatch.name = IDENTITY_MISMATCH;
+  throw mismatch;
+}
+
+/**
+ * `created_at` is written once, when the database is first opened. The observed
+ * server version is overwritten on every open; it never drives logic.
+ */
+function writeMeta(db: DatabaseSync, requestedPlatformId: string | undefined, dataDir: string): void {
+  const stored = db.prepare("SELECT value FROM meta WHERE key = 'platform_id'").get() as
+    | { value: string }
+    | undefined;
+
+  if (stored === undefined) {
+    const platformId = requestedPlatformId ?? basename(resolve(dataDir));
+    db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('platform_id', ?)").run(platformId);
+  }
+
+  db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', ?)").run(String(Date.now()));
+  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('server_version', ?)").run(SERVER_VERSION);
 }
 
 /**

@@ -41,10 +41,15 @@ test('conversation seqs and the consume cursor survive a restart on the same dat
       'the child consumes the message before the restart',
     );
 
+    const health = await call(firstServer, 'GET', '/v1/health');
+    assertOk(health, 'GET /v1/health before the restart');
+    const platformId = String(health.body.platform_id);
+    assert.match(platformId, /^p_[0-9a-f]{8}$/, 'health identifies the platform directory');
+
     await firstServer.stop();
     firstServer = undefined;
 
-    secondServer = await startServer({ dataDir });
+    secondServer = await startServer({ dataDir, platformId });
 
     const afterRestart = await poll(secondServer, child);
     assert.deepEqual(afterRestart.items, [], 'nothing is redelivered after the restart');
@@ -73,10 +78,14 @@ test('the storage layer enforces one name for the whole members table, deleted m
     const deleted = await call(server, 'DELETE', `/v1/members/${child.id}`, { token: root.token });
     assertStatus(deleted, 200, `DELETE /v1/members/${child.id} for the name dup`);
 
+    const health = await call(server, 'GET', '/v1/health');
+    assertOk(health, 'GET /v1/health before opening the database');
+    const platformId = String(health.body.platform_id);
+
     await server.stop();
     server = undefined;
 
-    const db = new DatabaseSync(join(dataDir, 'pigroups.db'), { readOnly: true });
+    const db = new DatabaseSync(join(dataDir, 'platforms', platformId, 'pigroups.db'), { readOnly: true });
     try {
       const indexes = db.prepare("PRAGMA index_list('members')").all() as any[];
       const nameIndexes = indexes.filter((index) => index.unique === 1 && indexColumnsOf(db, index.name).includes('name'));

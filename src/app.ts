@@ -24,12 +24,17 @@ const AUTH_PATHS = [
   '/v1/control',
 ];
 
-export function createApp(options: { db: DatabaseSync; startedAt: number }): Hono<AppEnv> {
+export function createApp(options: {
+  db: DatabaseSync;
+  startedAt: number;
+  platformId: string;
+}): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   const ctx: AppContext = {
     db: options.db,
     hub: createPollHub(),
     startedAt: options.startedAt,
+    platformId: options.platformId,
   };
 
   app.onError((error, c) => {

@@ -1,5 +1,6 @@
 node_modules/
 .data/
+.pigroups/
 _archive/
 *.log
 .DS_Store

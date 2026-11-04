@@ -20,8 +20,8 @@ import {
 } from './harness.ts';
 
 /** The row shape `routes/org.ts` wrote before e03af1a: a bare id, not JSON. */
-function insertLegacyTermination(dataDir: string, target: string): void {
-  const db = new DatabaseSync(join(dataDir, 'pigroups.db'), { timeout: 5000 });
+function insertLegacyTermination(databasePath: string, target: string): void {
+  const db = new DatabaseSync(databasePath, { timeout: 5000 });
   try {
     db.prepare(
       `INSERT INTO controls (id, from_id, to_json, cmd, payload_json, reply_to, created_at)
@@ -41,6 +41,10 @@ test('a legacy bare-id control target is healed when the database opens, and ?to
     await rm(dataDir, { recursive: true, force: true });
   });
 
+  const health = await call(server, 'GET', '/v1/health');
+  assertStatus(health, 200, 'GET /v1/health before the migration restart');
+  const databasePath = join(dataDir, 'platforms', String(health.body.platform_id), 'pigroups.db');
+
   const root = await bootstrapRoot(server);
   const human = await createHuman(server, 'legacy-human');
   const owner = await spawnMember(server, root, 'legacy-owner');
@@ -51,7 +55,7 @@ test('a legacy bare-id control target is healed when the database opens, and ?to
   await server.stop();
 
   // The pre-fix row, written into a stopped database so startup's migration sees it.
-  insertLegacyTermination(dataDir, legacyTarget);
+  insertLegacyTermination(databasePath, legacyTarget);
 
   server = await startServer({ dataDir }); // openDatabase() runs the backfill here
   const all = await call(server, 'GET', '/v1/control', {
@@ -85,10 +89,14 @@ test('a bare-id control target written while the server runs is still readable',
     await rm(dataDir, { recursive: true, force: true });
   });
 
+  const health = await call(server, 'GET', '/v1/health');
+  assertStatus(health, 200, 'GET /v1/health before writing a live legacy row');
+  const databasePath = join(dataDir, 'platforms', String(health.body.platform_id), 'pigroups.db');
+
   const human = await createHuman(server, 'live-legacy-human');
   // After the migration has run: only the tolerant reader can make this row readable.
   // It is not a shape this code writes; it is a shape a reader must not crash on.
-  insertLegacyTermination(dataDir, 'm_1live');
+  insertLegacyTermination(databasePath, 'm_1live');
 
   const all = await call(server, 'GET', '/v1/control', {
     token: human.token,

@@ -135,7 +135,7 @@ export function registerIdentityRoutes(app: Hono<AppEnv>, ctx: AppContext): void
         },
         conversations: conversationItems(db, principal).map((item) => ({ to: item.to, kind: item.kind })),
         last_seen_at: human.last_seen_at,
-        server: { version: SERVER_VERSION },
+        server: { version: SERVER_VERSION, platform_id: ctx.platformId },
       });
     }
 
@@ -146,7 +146,7 @@ export function registerIdentityRoutes(app: Hono<AppEnv>, ctx: AppContext): void
       groups: groupRefsOf(db, member),
       dms: dmRefsOf(db, member.id),
       last_seen_at: member.last_seen_at,
-      server: { version: SERVER_VERSION },
+      server: { version: SERVER_VERSION, platform_id: ctx.platformId },
     });
   });
 
@@ -155,6 +155,7 @@ export function registerIdentityRoutes(app: Hono<AppEnv>, ctx: AppContext): void
       status: 'ok',
       version: SERVER_VERSION,
       uptime_ms: Date.now() - startedAt,
+      platform_id: ctx.platformId,
     });
   });
 }

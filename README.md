@@ -9,10 +9,15 @@ consume-on-read inbox, one opaque instruction channel.
 
 ```bash
 npm install
-PIGROUPS_ADMIN_TOKEN=... npm run serve   # PORT=7717 PIGROUPS_DATA=./.data
-npm test                                  # 48 black-box tests
+PIGROUPS_ADMIN_TOKEN=... npm run serve            # PORT=7717 PIGROUPS_DATA=./.pigroups
+PIGROUPS_PLATFORM_ID=p_xxxxxxxx npm run serve     # when the root holds more than one platform
+npm test                                          # black-box tests, each with its own data root
 npm run typecheck
 ```
+
+One data root holds every platform (`<PIGROUPS_DATA>/platforms/<id>/pigroups.db`); without
+`PIGROUPS_PLATFORM_ID` the server reuses the only platform, or creates one in an empty root,
+and refuses to start when the choice is ambiguous.
 
 `AGENTS.md` holds the working rules: file ownership, the runtime contract, and
 the isolation rule that the implementation and the test suite are written and

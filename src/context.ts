@@ -16,4 +16,6 @@ export interface AppContext {
   db: DatabaseSync;
   hub: PollHub;
   startedAt: number;
+  /** The platform directory name, `p_<8 hex>`. */
+  platformId: string;
 }
