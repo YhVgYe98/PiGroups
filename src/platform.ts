@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { endpointPath } from './endpoint.ts';
 
 export const DEFAULT_DATA_ROOT = './.pigroups';
 
@@ -36,10 +37,12 @@ export interface ResolvePlatformOptions {
   platformId?: string;
   /**
    * Runs while the startup lock is still held, once the platform directory is
-   * ready. `main` opens the database here so that a concurrent process cannot
-   * see a just-created but still empty platform directory and create another.
+   * ready. `main` binds the port and opens the database here so that a
+   * concurrent process cannot see a just-created but still empty platform
+   * directory and create another. It may be asynchronous; the lock is released
+   * only after it settles.
    */
-  onResolved?: (paths: PlatformPaths) => void;
+  onResolved?: (paths: PlatformPaths) => void | Promise<void>;
 }
 
 /**
@@ -56,7 +59,7 @@ export interface ResolvePlatformOptions {
  * the only database there, it is adopted into a new `platforms/<id>/` directory
  * (database, WAL, SHM and rollback journal together) instead of being ignored.
  */
-export function resolvePlatform(options: ResolvePlatformOptions = {}): PlatformPaths {
+export async function resolvePlatform(options: ResolvePlatformOptions = {}): Promise<PlatformPaths> {
   const dataRoot = resolve(
     options.dataRoot ?? (process.env.PIGROUPS_DATA || DEFAULT_DATA_ROOT),
   );
@@ -65,11 +68,17 @@ export function resolvePlatform(options: ResolvePlatformOptions = {}): PlatformP
 
   const requested = singleDirectoryName(options.platformId ?? process.env.PIGROUPS_PLATFORM_ID);
 
-  // The lock serialises "look, then create or adopt". An explicit id with no
-  // root database to adopt needs no lookup — `mkdir` is idempotent and two
-  // processes opening the same database is SQLite's business — so a data root
-  // holding several platforms can start all of them at once.
-  const needsLock = requested === undefined || existsSync(join(dataRoot, DATABASE_NAME));
+  // The lock serialises "look, then create or adopt". A platform that already has
+  // an endpoint record is served by the port bind, so a data root holding several
+  // of them can start them all at once. A platform *without* a record has no
+  // rendezvous yet: two explicit-id starts with different PORT values would each
+  // bind a private port, each write a record, and both open the same database.
+  // That first start therefore takes the lock too, even with an explicit id.
+  const requestedDir = requested === undefined ? undefined : join(platformsDir, requested);
+  const needsLock =
+    requested === undefined ||
+    existsSync(join(dataRoot, DATABASE_NAME)) ||
+    (requestedDir !== undefined && !existsSync(endpointPath(requestedDir)));
   const lock = needsLock ? acquireStartLock(platformsDir) : null;
   try {
     const platformId = choosePlatformId(dataRoot, platformsDir, requested);
@@ -84,7 +93,7 @@ export function resolvePlatform(options: ResolvePlatformOptions = {}): PlatformP
       dbPath: join(platformDir, DATABASE_NAME),
       logPath: join(platformDir, 'server.log'),
     };
-    options.onResolved?.(paths);
+    await options.onResolved?.(paths);
     return paths;
   } finally {
     lock?.release();
@@ -387,7 +396,7 @@ function readStartLock(lockPath: string): StartLockHolder | null {
   }
 }
 
-function isProcessAlive(pid: number): boolean {
+export function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);

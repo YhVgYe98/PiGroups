@@ -126,20 +126,25 @@ test('a held startup lock refuses concurrent starters and creates no platform', 
   }
 });
 
-test('a platform named explicitly starts even while another startup holds the root lock', async () => {
+test('a platform with an endpoint record starts even while another startup holds the root lock', async () => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-startup-lock-explicit-'));
   const platformId = 'p_direct01';
   let server: Server | undefined;
   try {
-    const lockPath = writeStartLock(dataRoot, { pid: process.pid, at: Date.now() });
+    // The record is what makes the bind a rendezvous; creating the platform is
+    // the one start that needs the lock (there is nothing to meet yet).
+    server = await startServer({ dataDir: dataRoot, platformId });
+    await server.stop();
+    server = undefined;
 
+    const lockPath = writeStartLock(dataRoot, { pid: process.pid, at: Date.now() });
     server = await startServer({ dataDir: dataRoot, platformId });
     assert.equal(String((await health(server)).platform_id), platformId, 'an explicit platform needs no lookup');
     await server.stop();
     server = undefined;
 
     assert.ok(existsSync(lockPath), 'the other startup still holds the lock');
-    assert.ok(existsSync(databasePath(dataRoot, platformId)), 'the explicit platform was created');
+    assert.ok(existsSync(databasePath(dataRoot, platformId)), 'the explicit platform was reused');
   } finally {
     if (server) await server.stop();
     await rm(dataRoot, { recursive: true, force: true });
@@ -263,7 +268,7 @@ test('SIGTERM exits 0 and closes the database', async () => {
     assert.equal(exit.code, 0, `SIGTERM exits 0, got ${JSON.stringify(exit)}`);
     assert.deepEqual(
       (await readdir(join(dataRoot, 'platforms', platformId))).sort(),
-      ['pigroups.db', 'server.log'],
+      ['endpoint.json', 'pigroups.db', 'server.log'],
       'a clean shutdown leaves no -wal/-shm, which is the only outside proof the connection was closed',
     );
   } finally {

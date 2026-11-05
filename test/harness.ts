@@ -10,8 +10,9 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer, type Socket } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -35,6 +36,8 @@ export type ExitResult = ExitStatus & { stdout: string; stderr: string };
 export type Server = {
   port: number;
   baseUrl: string;
+  /** The platform process, so tests can compare it with the endpoint record. */
+  pid: number;
   /** The data root the server was started with (a temporary one when none was given). */
   dataDir: string;
   /** Everything the process has written to stdout so far. */
@@ -138,6 +141,12 @@ export type StartOptions = {
   omitDataDir?: boolean;
   /** Do not pre-create the data directory; the server is expected to create it. */
   createDataDir?: boolean;
+  /**
+   * The port to hand the platform as its first candidate. The platform may bind
+   * this one or advance past an occupied candidate; `port` on the result is the
+   * port it actually bound.
+   */
+  seedPort?: number;
 };
 
 /**
@@ -157,7 +166,7 @@ export async function startServer(options: StartOptions = {}): Promise<Server> {
 
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const port = await findFreePort();
+    const port = options.seedPort ?? (await findFreePort());
     try {
       return await spawnServer(port, options, { ownsDataDir, cwd, dataDir });
     } catch (error) {
@@ -199,7 +208,8 @@ async function spawnServer(
     exitNote = `spawn failed: ${error.message}`;
   });
 
-  const expected = `listening on ${port}`;
+  const expected = `listening on a port`;
+  let actualPort = 0;
   await new Promise<void>((resolve, reject) => {
     let settled = false;
     const succeed = () => {
@@ -224,8 +234,15 @@ async function spawnServer(
       READY_TIMEOUT_MS,
     );
     const scan = () => {
-      if (output.stdout.split('\n').some((line) => line.trim() === expected)) succeed();
-      else if (exitNote !== null) fail(exitNote);
+      for (const line of output.stdout.split('\n')) {
+        const match = /^listening on (\d+)$/.exec(line.trim());
+        if (match !== null) {
+          actualPort = Number.parseInt(match[1], 10);
+          succeed();
+          return;
+        }
+      }
+      if (exitNote !== null) fail(exitNote);
     };
     child.stdout!.on('data', scan);
     child.on('exit', () => fail(exitNote ?? 'the process exited before printing the readiness line'));
@@ -244,9 +261,11 @@ async function spawnServer(
     return status;
   };
 
+  const actual = actualPort === 0 ? port : actualPort;
   return {
-    port,
-    baseUrl: `http://127.0.0.1:${port}`,
+    port: actual,
+    baseUrl: `http://127.0.0.1:${actual}`,
+    pid: child.pid ?? 0,
     dataDir,
     stdout: () => output.stdout,
     stderr: () => output.stderr,
@@ -504,6 +523,11 @@ export async function poll(
 /** A listening socket on a fixed port, so a server started next to it cannot bind. */
 export async function holdPort(): Promise<{ port: number; release: () => Promise<void> }> {
   const holder = createServer();
+  const sockets = new Set<Socket>();
+  holder.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
   await new Promise<void>((resolve, reject) => {
     holder.once('error', reject);
     holder.listen(0, '127.0.0.1', () => resolve());
@@ -515,6 +539,94 @@ export async function holdPort(): Promise<{ port: number; release: () => Promise
   }
   return {
     port: address.port,
+    release: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => holder.close(() => resolve()));
+    },
+  };
+}
+
+/** A listening socket on a specific address, to prove what the loopback probe can reach. */
+export async function holdAddress(host: string): Promise<{ port: number; release: () => Promise<void> }> {
+  const holder = createServer();
+  const sockets = new Set<Socket>();
+  holder.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve, reject) => {
+    holder.once('error', reject);
+    holder.listen(0, host, () => resolve());
+  });
+  const address = holder.address();
+  if (address === null || typeof address === 'string') {
+    await new Promise<void>((resolve) => holder.close(() => resolve()));
+    throw new Error(`could not bind ${host}`);
+  }
+  return {
+    port: address.port,
+    release: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => holder.close(() => resolve()));
+    },
+  };
+}
+
+/** An HTTP service on one fixed port; undefined when the host will not give it. */
+export async function holdHttpAt(port: number): Promise<{ port: number; release: () => Promise<void> } | undefined> {
+  const holder = createHttpServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ hello: 'not a pigroups platform' }));
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      holder.once('error', reject);
+      holder.listen(port, '127.0.0.1', () => resolve());
+    });
+  } catch {
+    return undefined;
+  }
+  return {
+    port,
+    release: () =>
+      new Promise<void>((resolve) => {
+        holder.closeAllConnections();
+        holder.close(() => resolve());
+      }),
+  };
+}
+
+/**
+ * An unrelated HTTP service on a fixed port. Unlike `holdPort`, it answers, so a
+ * starting platform has positive evidence that the port is not its own and is
+ * allowed to move to the next candidate.
+ */
+export async function holdHttpPort(
+  body: unknown = { hello: 'not a pigroups platform' },
+): Promise<{ port: number; release: () => Promise<void> }> {
+  const holder = createHttpServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(body));
+  });
+  await new Promise<void>((resolve, reject) => {
+    holder.once('error', reject);
+    holder.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = holder.address();
+  if (address === null || typeof address === 'string') {
+    await new Promise<void>((resolve) => holder.close(() => resolve()));
+    throw new Error('could not allocate a held HTTP port');
+  }
+  return {
+    port: address.port,
     release: () => new Promise<void>((resolve) => holder.close(() => resolve())),
   };
+}
+
+export function endpointPath(dataRoot: string, platformId: string): string {
+  return join(dataRoot, 'platforms', platformId, 'endpoint.json');
+}
+
+export function readEndpointRecord(dataRoot: string, platformId: string): Record<string, any> {
+  return JSON.parse(readFileSync(endpointPath(dataRoot, platformId), 'utf8')) as Record<string, any>;
 }
