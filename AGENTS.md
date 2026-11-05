@@ -44,10 +44,11 @@ Documents are Chinese. Code, comments, commit messages, test names, and anything
     process: the bind is the single-instance lock. `platforms/<id>/endpoint.json` records
     `{platform_id, port, version, pid, updated_at}` right after the bind, and is the address a
     client or a later start uses. It is a hint, not proof of ownership.
-  - A candidate held by the same platform exits `2` without touching data; a candidate held by
-    anything that answers as a different service moves to the next port; a candidate that
-    answers nothing is refused (a platform that has bound but cannot answer yet may still be
-    starting the same instance).
+  - A candidate held by the same platform exits `2` without touching data. Every other outcome
+    (another platform, a non-PiGroups service, a refused connection, a timeout) gets a second
+    probe, and two probes that do not name this platform move to the next port. A bound
+    platform blocked opening its database cannot answer, so its own endpoint record — written
+    before that open — supplies the same `platform_id` and port and still exits `2`.
   - Before the database is open, `GET /v1/health` answers `503 {status:'starting', version,
     platform_id}` so a competing start can still identify the instance.
   - Prints exactly one line to stdout when it is ready to accept requests: `listening on <port>`
