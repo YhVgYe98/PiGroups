@@ -25,6 +25,7 @@ export interface MemberView {
   child_count: number;
   groups: GroupRef[];
   last_seen_at: number | null;
+  heartbeat_at: number | null;
   created_at: number;
 }
 
@@ -49,6 +50,7 @@ export function memberView(db: DatabaseSync, member: MemberRow): MemberView {
     child_count: liveChildren(db, member.id).length,
     groups: groupRefsOf(db, member),
     last_seen_at: member.last_seen_at,
+    heartbeat_at: member.heartbeat_at,
     created_at: member.created_at,
   };
 }

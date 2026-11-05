@@ -13,6 +13,7 @@ export interface MemberRow {
   request_id: string | null;
   created_at: number;
   last_seen_at: number | null;
+  heartbeat_at: number | null;
   gone_at: number | null;
   gone_reason: string | null;
 }

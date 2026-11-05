@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS members (
   request_id    TEXT,
   created_at    INTEGER NOT NULL,
   last_seen_at  INTEGER,
+  heartbeat_at  INTEGER,
   gone_at       INTEGER,
   gone_reason   TEXT
 );
@@ -143,6 +144,7 @@ export function openDatabase(dataDir: string, options: OpenDatabaseOptions = {})
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA foreign_keys = ON');
     db.exec(SCHEMA);
+    migrateMemberHeartbeat(db);
     writeMeta(db, options.platformId, dataDir);
     backfillControlTargets(db);
   } catch (error) {
@@ -150,6 +152,28 @@ export function openDatabase(dataDir: string, options: OpenDatabaseOptions = {})
     throw openFailure(error, dbPath);
   }
   return db;
+}
+
+/**
+ * `heartbeat_at` arrived in 0.5.0 (§9.1). `CREATE TABLE IF NOT EXISTS` leaves
+ * an existing members table untouched, so an older file needs this one
+ * idempotent `ALTER TABLE`. There is no migration framework and no
+ * `schema_version`: the column's presence is the whole state.
+ *
+ * The check and the `ALTER` share one write transaction on purpose. Two
+ * processes may open the same pre-0.5.0 file at once (an explicit
+ * `PIGROUPS_PLATFORM_ID` skips the start lock), so both can see "no column".
+ * Without the transaction the loser's `ALTER` fails with
+ * `duplicate column name: heartbeat_at` and that start is refused; with it the
+ * loser waits for the winner's commit, re-reads the table inside the lock, sees
+ * the column, and becomes a no-op.
+ */
+function migrateMemberHeartbeat(db: DatabaseSync): void {
+  tx(db, () => {
+    const columns = db.prepare("PRAGMA table_info('members')").all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === 'heartbeat_at')) return;
+    db.exec('ALTER TABLE members ADD COLUMN heartbeat_at INTEGER');
+  });
 }
 
 /** A bare `file is not a database` is useless inside a data root that holds several of them. */

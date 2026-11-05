@@ -72,6 +72,31 @@ export function registerOrgRoutes(app: Hono<AppEnv>, ctx: AppContext): void {
     return ok(c, { ...memberView(db, member) });
   });
 
+  app.put('/v1/members/:id/heartbeat', (c) => {
+    const caller = activeMember(c, 'humans cannot send heartbeats');
+    const targetId = c.req.param('id');
+    // `getMember` answers the one case `activeMember` cannot: an id that never
+    // existed is 404, not 403. The gone guard below is defence in depth and
+    // cannot fire today — `activeMember` refuses a gone caller (410) at request
+    // start, and the target must equal the caller. Both stay so the answers keep
+    // their shape if `activeMember` ever moves back behind a body read.
+    const target = getMember(db, targetId);
+    if (!target) throw notFound('member not found');
+    if (target.status !== 'alive') throw memberGone(targetId);
+    if (targetId !== caller.id) throw forbidden('only the member itself may send a heartbeat');
+
+    // One statement and no transaction. The transaction and `assertCanWrite`
+    // this route once had could not observe anything: the handler never awaits,
+    // and `status` only ever moves to `gone`, which `activeMember` already
+    // refused at request start. A re-read inside the write lock was a lock and
+    // a query for an answer that could not change. `last_seen_at` is refreshed
+    // by the auth middleware on every request, and `status` only changes on
+    // create/delete.
+    const heartbeatAt = Date.now();
+    db.prepare('UPDATE members SET heartbeat_at = ? WHERE id = ?').run(heartbeatAt, caller.id);
+    return ok(c, { heartbeat_at: heartbeatAt });
+  });
+
   app.delete('/v1/members/:id', (c) => {
     const caller = activeMember(c);
     const target = getMember(db, c.req.param('id'));
@@ -145,12 +170,13 @@ export function registerOrgRoutes(app: Hono<AppEnv>, ctx: AppContext): void {
     const found = db
       .prepare(
         `SELECT m.id AS id, m.name AS name, m.parent_id AS parent_id, m.last_seen_at AS last_seen_at,
+                m.heartbeat_at AS heartbeat_at,
                 (SELECT COUNT(*) FROM members c WHERE c.parent_id = m.id AND c.status = 'alive') AS child_count
          FROM members m
          WHERE m.status = 'alive'
          ORDER BY m.created_at, m.id`,
       )
-      .all() as unknown as { id: string; name: string; parent_id: string | null; last_seen_at: number | null; child_count: number }[];
+      .all() as unknown as { id: string; name: string; parent_id: string | null; last_seen_at: number | null; heartbeat_at: number | null; child_count: number }[];
 
     return ok(c, {
       nodes: found.map((entry) => ({
@@ -159,6 +185,7 @@ export function registerOrgRoutes(app: Hono<AppEnv>, ctx: AppContext): void {
         parent_id: entry.parent_id,
         child_count: Number(entry.child_count),
         last_seen_at: entry.last_seen_at,
+        heartbeat_at: entry.heartbeat_at,
       })),
     });
   });

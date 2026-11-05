@@ -23,10 +23,17 @@ export function activePrincipal(c: Context<AppEnv>): Principal {
   return principal;
 }
 
-/** Member-only endpoints; humans have no structural position (§3.5). */
-export function activeMember(c: Context<AppEnv>): MemberRow {
+/**
+ * Member-only endpoints; humans have no structural position (§3.5). The message
+ * is an argument for the routes that are not structural operations (a heartbeat
+ * is a member's own fact, not a change to the tree).
+ */
+export function activeMember(
+  c: Context<AppEnv>,
+  humanMessage = 'humans cannot perform structural operations',
+): MemberRow {
   const principal = activePrincipal(c);
-  if (principal.kind !== 'member') throw forbidden('humans cannot perform structural operations');
+  if (principal.kind !== 'member') throw forbidden(humanMessage);
   return principal.member;
 }
 
