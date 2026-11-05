@@ -981,24 +981,66 @@ test('a second start of the same platform exits 2 and leaves the first one servi
   }
 });
 
-test('a port held by something that never answers is not skipped', async () => {
+test('a port held by something that never answers is left after both probes', async () => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-silent-'));
   const held = await holdPort();
+  let server: Server | undefined;
   try {
-    const result = await runToExit({ dataDir: dataRoot, port: held.port });
-    assert.equal(result.code, 1, `a silent holder is not a licence to start a second platform: ${result.stderr}`);
-    assert.equal(result.stdout.trim(), '', 'no readiness line');
-    assert.match(result.stderr, /nothing identified itself as a PiGroups platform/, result.stderr);
-    assert.match(result.stderr, new RegExp(`cannot listen on ${held.port}`), result.stderr);
-    assert.equal(
-      result.stderr.split('\n').some((line) => /^\s+at\s/.test(line)),
-      false,
-      `stderr carries no stack frames: ${result.stderr}`,
+    // No probe names this platform and there is no record, so after both probes
+    // the candidate is "not us" and the start moves on (design §11.0).
+    server = await startServer({ dataDir: dataRoot, seedPort: held.port });
+    assert.ok(server.port > held.port, `served on ${server.port}, past the silent ${held.port}`);
+    assert.equal(server.stderr(), '', 'moving past a silent holder is not an error');
+    assert.equal(readEndpointRecord(dataRoot, String((await health(server)).platform_id)).port, server.port);
+  } finally {
+    if (server) await server.stop();
+    await held.release();
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('a port recorded as this platform exits 2 even when it cannot answer', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-recorded-silent-'));
+  const platformId = 'p_0ddd0001';
+  const held = await holdPort();
+  try {
+    mkdirSync(join(dataRoot, 'platforms', platformId), { recursive: true });
+    writeFileSync(
+      endpointPath(dataRoot, platformId),
+      JSON.stringify({
+        platform_id: platformId,
+        port: held.port,
+        version: '0.6.0',
+        pid: process.pid,
+        updated_at: Date.now(),
+      }),
     );
-    assert.deepEqual(await platformDirs(dataRoot), [], 'the refused start removes the empty platform directory');
-    assert.equal(existsSync(startLockPath(dataRoot)), false, 'the refused start leaves no startup lock');
+
+    const result = await runToExit({ dataDir: dataRoot, port: held.port, platformId });
+    assert.equal(result.code, 2, `the record is the same positive fact the probe would return: ${result.stderr}`);
+    assert.equal(result.stdout.trim(), '', 'no readiness line');
+    assert.match(result.stderr, /duplicate: platform p_0ddd0001 is already bound/, result.stderr);
+    assert.equal(existsSync(join(dataRoot, 'platforms', platformId, 'pigroups.db')), false, 'the duplicate opened nothing');
   } finally {
     await held.release();
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('a bind error that is not EADDRINUSE fails without leaving an empty platform directory', async (t) => {
+  if (process.getuid?.() === 0) {
+    t.skip('port 1 is bindable as root, so this host cannot produce EACCES');
+    return;
+  }
+  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-eacces-'));
+  try {
+    const result = await runToExit({ dataDir: dataRoot, port: 1 });
+    assert.equal(result.code, 1, 'a bind error is a startup failure');
+    assert.equal(result.stdout.trim(), '', 'no readiness line');
+    assert.match(result.stderr, /cannot listen on 1:/, result.stderr);
+    assert.deepEqual(await platformDirs(dataRoot), [], 'the failed start removed the empty platform directory');
+    assert.equal(existsSync(startLockPath(dataRoot)), false, 'the failed start left no startup lock');
+  } finally {
     await rm(dataRoot, { recursive: true, force: true });
   }
 });
@@ -1103,20 +1145,21 @@ test('the last candidate port does not wrap around', async (t) => {
   }
 });
 
-test('a holder that only listens on another loopback address is refused, not retried forever', async (t) => {
+test('a holder that only listens on another loopback address is left after both probes', async (t) => {
   const held = await holdAddress('127.0.0.2').catch(() => undefined);
   if (held === undefined) {
     t.skip('this host does not have a second loopback address');
     return;
   }
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-unprobeable-'));
+  let server: Server | undefined;
   try {
-    const result = await runToExit({ dataDir: dataRoot, port: held.port });
-    assert.equal(result.code, 1, 'the platform refuses instead of spinning on the same port');
-    assert.equal(result.stdout.trim(), '', 'no readiness line');
-    assert.match(result.stderr, /nothing answers GET \/v1\/health on 127\.0\.0\.1/, result.stderr);
-    assert.deepEqual(await platformDirs(dataRoot), [], 'the refused start left no platform directory');
+    // Nothing listens on 127.0.0.1, so neither probe names this platform: "not us".
+    server = await startServer({ dataDir: dataRoot, seedPort: held.port });
+    assert.ok(server.port > held.port, `served on ${server.port}, past the unreachable ${held.port}`);
+    assert.equal(server.stderr(), '', 'an unreachable holder is not an error');
   } finally {
+    if (server) await server.stop();
     await held.release();
     await rm(dataRoot, { recursive: true, force: true });
   }
