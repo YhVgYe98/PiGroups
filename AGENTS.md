@@ -3,7 +3,7 @@
 Read before writing anything:
 
 - `docs/概念稿.md` — the concept. **Authoritative.** Where it disagrees with anything else, it wins.
-- `docs/设计说明.md` — the implementation companion: tables, delivery semantics, the 15 endpoints, error codes, transaction boundaries.
+- `docs/设计说明.md` — the implementation companion: tables, delivery semantics, the 16 endpoints, error codes, transaction boundaries.
 
 There is no other spec. If something you need is not in those two files, ask; do not invent it.
 
