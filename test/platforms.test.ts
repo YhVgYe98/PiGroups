@@ -705,11 +705,19 @@ test('two processes starting on an empty root agree on exactly one platform', as
       startServer({ dataDir: dataRoot }),
       startServer({ dataDir: dataRoot }),
     ]);
+    // Partition before asserting: a thrown assertion here must not strand the
+    // winner that a later outcome would have pushed into `started`.
     for (const outcome of outcomes) {
       if (outcome.status === 'fulfilled') started.push(outcome.value);
-      else assert.ok(String(outcome.reason).includes('another process'), `the loser explains the lock: ${outcome.reason}`);
     }
-    assert.ok(started.length >= 1, 'at least one process starts');
+    const failures = outcomes.flatMap((outcome) =>
+      outcome.status === 'rejected' ? [String(outcome.reason)] : [],
+    );
+    for (const text of failures) {
+      assert.match(text, /another process|exited \(code=2/, `the loser says why: ${text}`);
+      assert.doesNotMatch(text, /listening on/, `the loser never became ready: ${text}`);
+    }
+    assert.equal(started.length, 1, 'exactly one process starts; the other is refused');
 
     const reported = new Set<string>();
     for (const server of started) reported.add(String((await health(server)).platform_id));
@@ -717,6 +725,111 @@ test('two processes starting on an empty root agree on exactly one platform', as
     assert.deepEqual(await platformDirs(dataRoot), [...reported], 'the empty root holds exactly one platform');
   } finally {
     for (const server of started) await server.stop();
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('three simultaneous starts of one recorded platform leave exactly one serving', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-race-recorded-'));
+  let first: Server | undefined;
+  const started: Server[] = [];
+  try {
+    // A recorded platform: every starter reads the same port from the record, so
+    // the bind — not the startup lock — decides between them.
+    first = await startServer({ dataDir: dataRoot });
+    const identity = String((await health(first)).platform_id);
+    const recordedPort = first.port;
+    await first.stop();
+    first = undefined;
+
+    const outcomes = await Promise.allSettled([
+      startServer({ dataDir: dataRoot, platformId: identity }),
+      startServer({ dataDir: dataRoot, platformId: identity }),
+      startServer({ dataDir: dataRoot, platformId: identity }),
+    ]);
+    for (const outcome of outcomes) {
+      if (outcome.status === 'fulfilled') started.push(outcome.value);
+    }
+    const failures = outcomes.flatMap((outcome) =>
+      outcome.status === 'rejected' ? [String(outcome.reason)] : [],
+    );
+    for (const text of failures) {
+      assert.match(text, /exited \(code=2/, `a loser exits 2: ${text}`);
+      assert.match(text, /duplicate:/, `a loser names the duplicate: ${text}`);
+      assert.doesNotMatch(text, /listening on/, `a loser never became ready: ${text}`);
+    }
+
+    assert.equal(started.length, 1, 'exactly one of three starters serves the platform');
+    const winner = started[0];
+    assert.equal(winner.port, recordedPort, 'the winner met the others on the recorded port');
+    assert.equal(String((await health(winner)).platform_id), identity, 'the same platform came back');
+    const record = readEndpointRecord(dataRoot, identity);
+    assert.equal(record.port, winner.port, 'the record names the winning port');
+    assert.equal(record.pid, winner.pid, 'the record names the winning process');
+    assert.deepEqual(await platformDirs(dataRoot), [identity], 'no loser created a second platform');
+    assert.equal(winner.stdout().split('\n').filter((line) => line.startsWith('listening on')).length, 1);
+  } finally {
+    if (first) await first.stop();
+    for (const server of started) await server.stop();
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('two simultaneous first starts of one explicit id admit exactly one process', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-race-first-'));
+  const platformId = 'p_0eee0001';
+  const started: Server[] = [];
+  try {
+    // No endpoint record yet: there is no rendezvous, so the startup lock is what
+    // keeps two different seed ports from becoming two servers on one database.
+    const outcomes = await Promise.allSettled([
+      startServer({ dataDir: dataRoot, platformId }),
+      startServer({ dataDir: dataRoot, platformId }),
+    ]);
+    for (const outcome of outcomes) {
+      if (outcome.status === 'fulfilled') started.push(outcome.value);
+    }
+    const failures = outcomes.flatMap((outcome) =>
+      outcome.status === 'rejected' ? [String(outcome.reason)] : [],
+    );
+    for (const text of failures) {
+      assert.match(text, /another process|exited \(code=2/, `the loser says why: ${text}`);
+      assert.doesNotMatch(text, /listening on/, `the loser never became ready: ${text}`);
+    }
+
+    assert.equal(started.length, 1, 'exactly one process serves the first start');
+    assert.equal(String((await health(started[0])).platform_id), platformId, 'the declared id is the one served');
+    const record = readEndpointRecord(dataRoot, platformId);
+    assert.equal(record.pid, started[0].pid, 'the record names the winning process');
+    assert.equal(record.port, started[0].port, 'the record names the winning port');
+  } finally {
+    for (const server of started) await server.stop();
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('a start walks past several occupied ports to the first free one', async (t) => {
+  const held = await holdHttpPort();
+  const next = await holdHttpAt(held.port + 1);
+  if (next === undefined) {
+    await held.release();
+    t.skip('the port above the first holder was not available to the test');
+    return;
+  }
+  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-walk-'));
+  let server: Server | undefined;
+  try {
+    server = await startServer({ dataDir: dataRoot, seedPort: held.port });
+    assert.ok(server.port >= held.port + 2, `served on ${server.port}, past ${held.port} and ${held.port + 1}`);
+    assert.equal(server.stderr(), '', 'walking past two unrelated services is not an error');
+    const identity = String((await health(server)).platform_id);
+    const record = readEndpointRecord(dataRoot, identity);
+    assert.equal(record.port, server.port, 'the record names the port the walk ended on');
+    assert.equal(record.pid, server.pid, 'the record names the process that bound it');
+  } finally {
+    if (server) await server.stop();
+    await next.release();
+    await held.release();
     await rm(dataRoot, { recursive: true, force: true });
   }
 });
@@ -959,6 +1072,7 @@ test('a second start of the same platform exits 2 and leaves the first one servi
     server = await startServer({ dataDir: dataRoot });
     const identity = String((await health(server)).platform_id);
     const before = readEndpointRecord(dataRoot, identity);
+    const databaseBefore = readFileSync(databasePath(dataRoot, identity));
 
     const result = await runToExit({ dataDir: dataRoot, port: server.port });
     assert.equal(result.code, 2, `a duplicate start exits 2: ${result.stderr}`);
@@ -973,6 +1087,10 @@ test('a second start of the same platform exits 2 and leaves the first one servi
 
     assert.ok((await health(server)).status === 'ok', 'the original platform is untouched');
     assert.deepEqual(readEndpointRecord(dataRoot, identity), before, 'the duplicate wrote nothing');
+    assert.ok(
+      readFileSync(databasePath(dataRoot, identity)).equals(databaseBefore),
+      'the duplicate never opened the database',
+    );
     assert.deepEqual(await platformDirs(dataRoot), [identity], 'no second platform directory appeared');
     assert.equal(existsSync(startLockPath(dataRoot)), false, 'the duplicate left no startup lock');
   } finally {
