@@ -283,8 +283,9 @@ test('two concurrent opens of the same pre-0.5.0 database both succeed and add o
     dropHeartbeatColumn(dbPath);
     assert.deepEqual(heartbeatColumns(dbPath), [], 'the fixture really is a database without the heartbeat column');
 
-    // An explicit PIGROUPS_PLATFORM_ID skips the start lock, so two processes may
-    // open this file at the same time; `openInWorker` is that second process.
+    // `openDatabase` must tolerate two concurrent opens even though `main.ts`
+    // now takes the start lock for a platform with no endpoint record: the lock
+    // covers the CLI's first start, not every caller of this function.
     // The holder opens the microsecond window between "no column" and the ALTER
     // that the race needs, and adds the column itself just before releasing it.
     holder = startLockHolder(dbPath);

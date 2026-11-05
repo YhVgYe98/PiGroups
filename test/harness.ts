@@ -31,7 +31,7 @@ export type Json = any;
 
 export type ExitStatus = { code: number | null; signal: NodeJS.Signals | null };
 
-export type ExitResult = ExitStatus & { stdout: string; stderr: string };
+export type ExitResult = ExitStatus & { stdout: string; stderr: string; pid: number };
 
 export type Server = {
   port: number;
@@ -45,6 +45,8 @@ export type Server = {
   /** Everything the process has written to stderr so far. */
   stderr: () => string;
   stop: () => Promise<ExitStatus>;
+  /** SIGKILL, leaving the data root (and every record in it) exactly as it was. */
+  crash: () => Promise<ExitStatus>;
 };
 
 export type Principal = { id: string; token: string; name: string };
@@ -63,6 +65,11 @@ export type CallOptions = {
   query?: Record<string, string | number | undefined>;
   timeoutMs?: number;
 };
+
+/** A port that is free right now; a seed for a test that needs to name one. */
+export async function freePortNumber(): Promise<number> {
+  return findFreePort();
+}
 
 async function findFreePort(): Promise<number> {
   const probe = createServer();
@@ -260,6 +267,13 @@ async function spawnServer(
     if (ownsDataDir) await rm(dataDir, { recursive: true, force: true });
     return status;
   };
+  const crash = async (): Promise<ExitStatus> => {
+    if (stopped) return { code: child.exitCode, signal: child.signalCode };
+    stopped = true;
+    child.kill('SIGKILL');
+    await waitForExit(child, STOP_TIMEOUT_MS);
+    return { code: child.exitCode, signal: child.signalCode };
+  };
 
   const actual = actualPort === 0 ? port : actualPort;
   return {
@@ -270,6 +284,54 @@ async function spawnServer(
     stdout: () => output.stdout,
     stderr: () => output.stderr,
     stop,
+    crash,
+  };
+}
+
+/**
+ * Spawn the server without waiting for readiness. Needed when the test must
+ * observe the window between the bind and the ready line (the database open can
+ * be blocked on purpose).
+ */
+export function spawnRaw(options: {
+  dataDir: string;
+  platformId?: string;
+  /** Omit to leave PORT unset, so the platform uses its default. */
+  seedPort?: number;
+}): {
+  pid: number;
+  stdout: () => string;
+  stderr: () => string;
+  waitForExit: (timeoutMs: number) => Promise<ExitStatus>;
+  kill: (signal?: NodeJS.Signals) => void;
+} {
+  const env = spawnedEnv(options.seedPort ?? 0, options.dataDir, undefined, options.platformId, false);
+  if (options.seedPort === undefined) delete env.PORT;
+  const child = spawn(process.execPath, [ENTRY_POINT], {
+    cwd: REPO_ROOT,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const output = { stdout: '', stderr: '' };
+  child.stdout!.setEncoding('utf8');
+  child.stderr!.setEncoding('utf8');
+  child.stdout!.on('data', (chunk: string) => {
+    output.stdout += chunk;
+  });
+  child.stderr!.on('data', (chunk: string) => {
+    output.stderr += chunk;
+  });
+  return {
+    pid: child.pid ?? 0,
+    stdout: () => output.stdout,
+    stderr: () => output.stderr,
+    waitForExit: async (timeoutMs: number): Promise<ExitStatus> => {
+      const exited = await waitForExit(child, timeoutMs);
+      return exited ? { code: child.exitCode, signal: child.signalCode } : { code: null, signal: null };
+    },
+    kill: (signal: NodeJS.Signals = 'SIGTERM') => {
+      child.kill(signal);
+    },
   };
 }
 
@@ -333,7 +395,7 @@ export async function runToExit(options: RunToExitOptions): Promise<ExitResult> 
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ code, signal, stdout, stderr });
+      resolve({ code, signal, stdout, stderr, pid: child.pid ?? 0 });
     });
   });
 }
@@ -569,6 +631,41 @@ export async function holdAddress(host: string): Promise<{ port: number; release
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => holder.close(() => resolve()));
     },
+  };
+}
+
+/**
+ * A responder whose answers are scripted per request. Used to prove which probe
+ * produced which answer: a body without `platform_id` is "no answer", a body
+ * with one is the positive fact.
+ */
+export async function holdScriptedHealth(
+  replies: Array<{ status?: number; body: unknown }>,
+): Promise<{ port: number; requests: () => Array<{ path: string; at: number }>; release: () => Promise<void> }> {
+  const seen: Array<{ path: string; at: number }> = [];
+  const holder = createHttpServer((request, response) => {
+    seen.push({ path: request.url ?? '', at: Date.now() });
+    const reply = replies[Math.min(seen.length - 1, replies.length - 1)];
+    response.writeHead(reply.status ?? 200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(reply.body));
+  });
+  await new Promise<void>((resolve, reject) => {
+    holder.once('error', reject);
+    holder.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = holder.address();
+  if (address === null || typeof address === 'string') {
+    await new Promise<void>((resolve) => holder.close(() => resolve()));
+    throw new Error('could not allocate a scripted health port');
+  }
+  return {
+    port: address.port,
+    requests: () => [...seen],
+    release: () =>
+      new Promise<void>((resolve) => {
+        holder.closeAllConnections();
+        holder.close(() => resolve());
+      }),
   };
 }
 
