@@ -17,7 +17,9 @@ Documents are Chinese. Code, comments, commit messages, test names, and anything
 - SQLite through the built-in `node:sqlite` (`DatabaseSync`). No better-sqlite3, no native modules, no ORM.
 - HTTP through `hono` + `@hono/node-server`.
 - `npm run serve` → `node src/main.ts`
-  - Listens on `PORT` (default `7717`).
+  - Listens on `PORT` (default `7717`). `PORT` is only the *first candidate*: an existing
+    platform starts from the port in its own `endpoint.json`, and an occupied candidate moves
+    to the next port when the holder identifies itself as something else (design §11.0).
   - Data root from `PIGROUPS_DATA` (default `./.pigroups`), created if missing.
   - **One data root holds every platform.** The database is
     `<PIGROUPS_DATA>/platforms/<platform_id>/pigroups.db`, pinned by `docs/设计说明.md` §11.
@@ -33,9 +35,21 @@ Documents are Chinese. Code, comments, commit messages, test names, and anything
     A root database next to an existing platform refuses to start, even with an explicit id.
   - Startup takes `<PIGROUPS_DATA>/platforms/.start.lock` while it looks for a platform and
     opens the database. A concurrent start in the same root whose holder is still alive is
-    refused immediately (not queued); the lock is not taken when an explicit id is given and
-    no root database is waiting to be adopted.
-  - The port is probed before any data is touched, so a busy port creates and moves nothing.
+    refused immediately (not queued). The lock picks an id, adopts a legacy database, and
+    covers the first start of a platform that has no endpoint record yet (two starters with
+    different PORT values would otherwise bind different ports and open one database). A
+    platform that already has a record skips the lock: its port is the rendezvous. The lock
+    is not the runtime single-instance check.
+  - The listener is bound *before* the database is opened, and held for the life of the
+    process: the bind is the single-instance lock. `platforms/<id>/endpoint.json` records
+    `{platform_id, port, version, pid, updated_at}` right after the bind, and is the address a
+    client or a later start uses. It is a hint, not proof of ownership.
+  - A candidate held by the same platform exits `2` without touching data; a candidate held by
+    anything that answers as a different service moves to the next port; a candidate that
+    answers nothing is refused (a platform that has bound but cannot answer yet may still be
+    starting the same instance).
+  - Before the database is open, `GET /v1/health` answers `503 {status:'starting', version,
+    platform_id}` so a competing start can still identify the instance.
   - Prints exactly one line to stdout when it is ready to accept requests: `listening on <port>`
   - On `SIGTERM` / `SIGINT`: stop accepting, close the DB, exit `0`.
   - `PIGROUPS_ADMIN_TOKEN`, when set, is read from the environment. `POST /v1/humans` requires it
