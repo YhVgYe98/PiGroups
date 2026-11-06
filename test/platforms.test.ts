@@ -1,19 +1,15 @@
 /**
- * Platform layout, platform selection and adoption, mostly through the CLI.
- * Two tests call `resolvePlatform` directly (the adoption file moves are not
- * observable over HTTP); the rest spawn `src/main.ts` and only use HTTP.
+ * Platform layout, selection, endpoint claims and startup races, mostly through
+ * the CLI. A few tests call `readEndpoint` directly; everything else spawns
+ * `src/main.ts` and observes it over HTTP.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  copyFileSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
-  renameSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -21,9 +17,9 @@ import { mkdtemp, readFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { createConnection } from 'node:net';
 import { readEndpoint } from '../src/endpoint.ts';
 
-import { resolvePlatform } from '../src/platform.ts';
 import {
   assertErrorCode,
   assertOk,
@@ -50,9 +46,7 @@ import {
   sendMessage,
   spawnMember,
   spawnRaw,
-  startLockPath,
   startServer,
-  writeStartLock,
   type Server,
 } from './harness.ts';
 
@@ -67,6 +61,19 @@ async function health(server: Server): Promise<Record<string, any>> {
   const reply = await call(server, 'GET', '/v1/health');
   assertOk(reply, 'GET /v1/health');
   return reply.body;
+}
+
+async function isListening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    const done = (value: boolean) => {
+      socket.destroy();
+      resolve(value);
+    };
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+    socket.setTimeout(200, () => done(false));
+  });
 }
 
 test('an empty data root creates platforms/<platform_id>/pigroups.db and stores its identity in meta', async () => {
@@ -537,112 +544,6 @@ test('GET /v1/whoami carries server.platform_id for both a member and a human', 
 });
 
 /** A 0.2.0 database whose newest row exists only in an uncheckpointed WAL. */
-function writeLegacyDatabaseWithWal(dataRoot: string): void {
-  const scratch = mkdtempSync(join(tmpdir(), 'pigroups-legacy-wal-'));
-  const scratchDb = join(scratch, 'pigroups.db');
-  writeOldDatabase(scratchDb);
-  const db = new DatabaseSync(scratchDb, { timeout: 5000 });
-  try {
-    const createdAt = 1_760_000_000_001;
-    db.exec('PRAGMA journal_mode = WAL');
-    db.exec('PRAGMA wal_autocheckpoint = 0');
-    db.prepare(
-      `INSERT INTO members (id, name, parent_id, is_root, status, token_hash, request_id, created_at)
-       VALUES ('m_wa1003', 'wal-only', 'm_r00t01', 0, 'alive', 'wal-hash', NULL, ?)`,
-    ).run(createdAt);
-    // Copy while the connection is open, so the newest row is still only in the WAL.
-    copyFileSync(scratchDb, join(dataRoot, 'pigroups.db'));
-    copyFileSync(`${scratchDb}-wal`, join(dataRoot, 'pigroups.db-wal'));
-    if (existsSync(`${scratchDb}-shm`)) copyFileSync(`${scratchDb}-shm`, join(dataRoot, 'pigroups.db-shm'));
-  } finally {
-    db.close();
-    rmSync(scratch, { recursive: true, force: true });
-  }
-}
-
-test('a legacy database at the data root is moved into the generated platform together with its sidecars', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-adopt-files-'));
-  const rootDb = join(dataRoot, 'pigroups.db');
-  try {
-    writeOldDatabase(rootDb);
-    writeFileSync(`${rootDb}-wal`, 'fake-wal-contents');
-    writeFileSync(`${rootDb}-shm`, 'fake-shm-contents');
-
-    const layout = await resolvePlatform({ dataRoot });
-    assert.match(layout.platformId, /^p_[0-9a-f]{8}$/, 'adoption generates a new platform id');
-    assert.equal(layout.platformDir, join(dataRoot, 'platforms', layout.platformId), 'the platform lives under platforms/<id>');
-
-    for (const [suffix, expected] of [
-      ['', null],
-      ['-wal', 'fake-wal-contents'],
-      ['-shm', 'fake-shm-contents'],
-    ] as const) {
-      assert.equal(existsSync(`${rootDb}${suffix}`), false, `the root pigroups.db${suffix} was moved`);
-      const moved = join(layout.platformDir, `pigroups.db${suffix}`);
-      assert.ok(existsSync(moved), `platforms/<id>/pigroups.db${suffix} exists`);
-      if (expected !== null) assert.equal(readFileSync(moved, 'utf8'), expected, `pigroups.db${suffix} contents survived`);
-    }
-    assert.equal(existsSync(startLockPath(dataRoot)), false, 'the startup lock is released');
-
-    const second = await resolvePlatform({ dataRoot });
-    assert.equal(second.platformId, layout.platformId, 'a second resolution reuses the adopted platform instead of moving again');
-    assert.equal(existsSync(`${rootDb}-wal`), false, 'the second resolution has nothing left to move');
-  } finally {
-    await rm(dataRoot, { recursive: true, force: true });
-  }
-});
-
-test('a 0.2.0 root database is adopted on startup with its WAL, keeps every row, and is not moved twice', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-adopt-start-'));
-  const rootDb = join(dataRoot, 'pigroups.db');
-  let server: Server | undefined;
-  let platformId = '';
-  try {
-    writeLegacyDatabaseWithWal(dataRoot);
-    const beforeDb = new DatabaseSync(rootDb, { readOnly: true });
-    const before = tableCounts(beforeDb);
-    beforeDb.close();
-    assert.equal(before.members, 3, 'the fixture has two rows in the main file and one only in the WAL');
-    assert.equal(before.messages, 1, 'the fixture has one message');
-    assert.ok(existsSync(`${rootDb}-wal`), 'the fixture starts with a WAL file');
-
-    server = await startServer({ dataDir: dataRoot });
-    platformId = String((await health(server)).platform_id);
-    assert.match(platformId, /^p_[0-9a-f]{8}$/, 'health reports the generated platform id');
-    assert.deepEqual(await platformDirs(dataRoot), [platformId], 'exactly one platform directory exists');
-    assert.ok(existsSync(databasePath(dataRoot, platformId)), 'the database landed under platforms/<id>');
-    assert.equal(existsSync(rootDb), false, 'the old root database is gone');
-    assert.equal(existsSync(`${rootDb}-wal`), false, 'the old root WAL is gone');
-    assert.equal(existsSync(`${rootDb}-shm`), false, 'the old root SHM is gone');
-    await server.stop();
-    server = undefined;
-
-    const openedDb = new DatabaseSync(databasePath(dataRoot, platformId), { readOnly: true });
-    try {
-      assert.deepEqual(tableCounts(openedDb), before, 'every row of every 0.2.0 table survived the move');
-    } finally {
-      openedDb.close();
-    }
-    const adoptedMeta = metaRows(databasePath(dataRoot, platformId));
-    assert.equal(adoptedMeta.platform_id, platformId, 'the adopted database records the new identity');
-
-    server = await startServer({ dataDir: dataRoot });
-    assert.deepEqual(
-      metaRows(databasePath(dataRoot, platformId)),
-      adoptedMeta,
-      'a restart of the adopted platform rewrites none of the three meta rows',
-    );
-    assert.equal(String((await health(server)).platform_id), platformId, 'a restart reuses the adopted platform');
-    await server.stop();
-    server = undefined;
-    assert.deepEqual(await platformDirs(dataRoot), [platformId], 'the restart did not create or move another platform');
-    assert.equal(existsSync(rootDb), false, 'the restart did not recreate the old root database');
-  } finally {
-    if (server) await server.stop();
-    await rm(dataRoot, { recursive: true, force: true });
-  }
-});
-
 test('a root database next to an existing platform refuses to start instead of guessing', async () => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-adopt-conflict-'));
   const platformId = 'p_0000feed';
@@ -656,7 +557,7 @@ test('a root database next to an existing platform refuses to start instead of g
     const result = await runToExit({ dataDir: dataRoot });
     assert.equal(result.code, 1, 'the server must not choose between a root database and a platform');
     assert.equal(result.stdout.trim(), '', 'a refused startup does not print a readiness line');
-    assert.ok(result.stderr.includes('old database'), `the error names the root database: ${result.stderr}`);
+    assert.match(result.stderr, /0\.2\.0 layout/, `the error names the unsupported layout: ${result.stderr}`);
     assert.ok(result.stderr.includes('platforms/'), `the error points at platforms/: ${result.stderr}`);
     assert.ok(result.stderr.includes('pigroups.db'), `the error names the files to move: ${result.stderr}`);
     assert.ok(existsSync(rootDb), 'the refused startup leaves the root database alone');
@@ -667,48 +568,14 @@ test('a root database next to an existing platform refuses to start instead of g
   }
 });
 
-test('a fresh start lock refuses a second process and names the holder pid', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-lock-fresh-'));
-  try {
-    const lockPath = writeStartLock(dataRoot, { pid: process.pid, at: Date.now() });
-
-    const result = await runToExit({ dataDir: dataRoot });
-    assert.equal(result.code, 1, 'the server must not start while another process holds the lock');
-    assert.equal(result.stdout.trim(), '', 'a refused startup does not print a readiness line');
-    assert.ok(result.stderr.includes('another process'), `the error explains the lock holder: ${result.stderr}`);
-    assert.ok(result.stderr.includes(String(process.pid)), `the error names pid ${process.pid}: ${result.stderr}`);
-    assert.ok(existsSync(lockPath), 'a refusal does not delete the live holder\'s lock');
-    assert.deepEqual(await platformDirs(dataRoot), [], 'the refused process did not create a platform');
-  } finally {
-    await rm(dataRoot, { recursive: true, force: true });
-  }
-});
-
-test('a lock held by a process that is gone is removed even when the file is fresh', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-lock-stale-'));
-  let server: Server | undefined;
-  try {
-    const lockPath = writeStartLock(dataRoot, { pid: deadPid(), at: Date.now() });
-    assert.ok(existsSync(lockPath), 'the fixture starts with a lock whose holder is dead');
-
-    server = await startServer({ dataDir: dataRoot });
-    const platformId = String((await health(server)).platform_id);
-    assert.match(platformId, /^p_[0-9a-f]{8}$/, 'the stale lock does not block platform creation');
-    assert.equal(existsSync(lockPath), false, 'the successful startup removes the stale lock');
-    assert.deepEqual(await platformDirs(dataRoot), [platformId], 'the startup created exactly one platform');
-  } finally {
-    if (server) await server.stop();
-    await rm(dataRoot, { recursive: true, force: true });
-  }
-});
-
 test('two processes starting on an empty root agree on exactly one platform', async () => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-race-'));
   const started: Server[] = [];
   try {
+    const platformId = 'p_race0001';
     const outcomes = await Promise.allSettled([
-      startServer({ dataDir: dataRoot }),
-      startServer({ dataDir: dataRoot }),
+      startServer({ dataDir: dataRoot, platformId }),
+      startServer({ dataDir: dataRoot, platformId }),
     ]);
     // Partition before asserting: a thrown assertion here must not strand the
     // winner that a later outcome would have pushed into `started`.
@@ -719,7 +586,7 @@ test('two processes starting on an empty root agree on exactly one platform', as
       outcome.status === 'rejected' ? [String(outcome.reason)] : [],
     );
     for (const text of failures) {
-      assert.match(text, /another process|exited \(code=2/, `the loser says why: ${text}`);
+      assert.match(text, /exited \(code=2/, `the first-start loser exits 2: ${text}`);
       assert.doesNotMatch(text, /listening on/, `the loser never became ready: ${text}`);
     }
     assert.equal(started.length, 1, 'exactly one process starts; the other is refused');
@@ -785,8 +652,8 @@ test('two simultaneous first starts of one explicit id admit exactly one process
   const platformId = 'p_0eee0001';
   const started: Server[] = [];
   try {
-    // No endpoint record yet: there is no rendezvous, so the startup lock is what
-    // keeps two different seed ports from becoming two servers on one database.
+    // No endpoint record yet: the `wx` claim publishes the first seed, and the
+    // loser follows that same candidate instead of binding its own port.
     const outcomes = await Promise.allSettled([
       startServer({ dataDir: dataRoot, platformId }),
       startServer({ dataDir: dataRoot, platformId }),
@@ -798,7 +665,7 @@ test('two simultaneous first starts of one explicit id admit exactly one process
       outcome.status === 'rejected' ? [String(outcome.reason)] : [],
     );
     for (const text of failures) {
-      assert.match(text, /another process|exited \(code=2/, `the loser says why: ${text}`);
+      assert.match(text, /exited \(code=2/, `the first-start loser exits 2: ${text}`);
       assert.doesNotMatch(text, /listening on/, `the loser never became ready: ${text}`);
     }
 
@@ -871,99 +738,12 @@ test('a root with only a platform-shaped empty directory gets a fresh platform, 
 
     server = await startServer({ dataDir: dataRoot });
     const platformId = String((await health(server)).platform_id);
-    assert.match(platformId, /^p_[0-9a-f]{8}$/, 'the server generates a fresh platform id');
+    assert.match(platformId, /^p_[0-9a-f]{8}$/, 'a fresh platform is created');
     assert.notEqual(platformId, deadId, 'the empty directory is not mistaken for a platform');
     assert.ok(existsSync(databasePath(dataRoot, platformId)), 'the new platform has a database');
     assert.equal(existsSync(databasePath(dataRoot, deadId)), false, 'the empty directory was not turned into a platform');
   } finally {
     if (server) await server.stop();
-    await rm(dataRoot, { recursive: true, force: true });
-  }
-});
-
-test('a legacy root database is adopted into the platform named by PIGROUPS_PLATFORM_ID', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-adopt-explicit-'));
-  const rootDb = join(dataRoot, 'pigroups.db');
-  const platformId = 'p_feed0001';
-  let server: Server | undefined;
-  try {
-    writeOldDatabase(rootDb);
-
-    server = await startServer({ dataDir: dataRoot, platformId });
-    assert.equal(String((await health(server)).platform_id), platformId, 'adoption honours the explicit platform id');
-    await server.stop();
-    server = undefined;
-
-    assert.ok(existsSync(databasePath(dataRoot, platformId)), 'the database landed in the named platform');
-    assert.equal(existsSync(rootDb), false, 'the root database was moved, not copied');
-    assert.equal(metaRows(databasePath(dataRoot, platformId)).platform_id, platformId, 'the adopted database carries that id');
-    assert.deepEqual(await platformDirs(dataRoot), [platformId], 'no second platform was generated');
-  } finally {
-    if (server) await server.stop();
-    await rm(dataRoot, { recursive: true, force: true });
-  }
-});
-
-test('an adoption interrupted after moving the WAL finishes in that directory and keeps the WAL rows', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-adopt-halfway-'));
-  const rootDb = join(dataRoot, 'pigroups.db');
-  const orphanId = 'p_orphan01';
-  let server: Server | undefined;
-  try {
-    // Fixture: the database is still at the root, but the sidecars were already
-    // moved into a platform directory when the previous process was killed.
-    writeLegacyDatabaseWithWal(dataRoot);
-    const orphanDir = join(dataRoot, 'platforms', orphanId);
-    mkdirSync(orphanDir, { recursive: true });
-    renameSync(`${rootDb}-wal`, join(orphanDir, 'pigroups.db-wal'));
-    assert.ok(existsSync(rootDb), 'the fixture keeps the database at the root');
-    assert.ok(existsSync(join(orphanDir, 'pigroups.db-wal')), 'the fixture has the WAL in the platform directory');
-
-    server = await startServer({ dataDir: dataRoot });
-    assert.equal(
-      String((await health(server)).platform_id),
-      orphanId,
-      'the interrupted adoption is finished in the directory that already holds its sidecars',
-    );
-    await server.stop();
-    server = undefined;
-
-    assert.equal(existsSync(rootDb), false, 'the root database was moved');
-    const db = new DatabaseSync(databasePath(dataRoot, orphanId), { readOnly: true });
-    let members = 0;
-    try {
-      members = Number((db.prepare('SELECT COUNT(*) AS count FROM members').get() as { count: number }).count);
-    } finally {
-      db.close();
-    }
-    assert.equal(members, 3, 'the row that only existed in the WAL survived the interrupted adoption');
-    assert.deepEqual(await platformDirs(dataRoot), [orphanId], 'no second platform was generated next to the sidecars');
-  } finally {
-    if (server) await server.stop();
-    await rm(dataRoot, { recursive: true, force: true });
-  }
-});
-
-test('two directories holding sidecars make adoption refuse instead of orphaning one of them', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-adopt-ambiguous-'));
-  const rootDb = join(dataRoot, 'pigroups.db');
-  try {
-    writeOldDatabase(rootDb);
-    for (const id of ['p_orphan11', 'p_orphan22']) {
-      const dir = join(dataRoot, 'platforms', id);
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, 'pigroups.db-wal'), 'fake-wal-contents');
-    }
-
-    const result = await runToExit({ dataDir: dataRoot });
-    assert.equal(result.code, 1, 'two candidate sidecar directories are ambiguous');
-    assert.equal(result.stdout.trim(), '', 'a refused startup does not print a readiness line');
-    assert.ok(result.stderr.includes('p_orphan11'), `the error names the first directory: ${result.stderr}`);
-    assert.ok(result.stderr.includes('p_orphan22'), `the error names the second directory: ${result.stderr}`);
-    assert.ok(existsSync(rootDb), 'the refused startup leaves the root database alone');
-    assert.equal(existsSync(databasePath(dataRoot, 'p_orphan11')), false, 'no database was created for the first candidate');
-    assert.equal(existsSync(databasePath(dataRoot, 'p_orphan22')), false, 'no database was created for the second candidate');
-  } finally {
     await rm(dataRoot, { recursive: true, force: true });
   }
 });
@@ -979,7 +759,7 @@ test('an old database at the root refuses to start even when PIGROUPS_PLATFORM_I
 
     const result = await runToExit({ dataDir: dataRoot, platformId });
     assert.equal(result.code, 1, 'an unclaimed database at the root is never silently ignored');
-    assert.ok(result.stderr.includes('old database'), `the error names the root database: ${result.stderr}`);
+    assert.match(result.stderr, /0\.2\.0 layout/, `the error names the unsupported layout: ${result.stderr}`);
     assert.ok(existsSync(rootDb), 'the refused startup leaves the root database in place');
     assert.deepEqual(await platformDirs(dataRoot), [platformId], 'the refused startup creates nothing');
   } finally {
@@ -996,7 +776,7 @@ test('a directory named pigroups.db is not a platform', async () => {
 
     server = await startServer({ dataDir: dataRoot });
     const platformId = String((await health(server)).platform_id);
-    assert.match(platformId, /^p_[0-9a-f]{8}$/, 'the server generates its own platform');
+    assert.match(platformId, /^p_[0-9a-f]{8}$/, 'a fresh platform is created');
     assert.notEqual(platformId, impostor, 'a directory that happens to be named pigroups.db is not a platform');
     assert.ok(existsSync(databasePath(dataRoot, platformId)), 'the generated platform has a real database file');
   } finally {
@@ -1022,7 +802,7 @@ test('renaming a platform directory refuses to start and asks for the directory 
     assert.ok(result.stderr.includes(renamedId), `the error names the directory: ${result.stderr}`);
     assert.match(
       result.stderr,
-      new RegExp(`rename the directory back to ${platformId}`),
+      new RegExp(`rename the directory back to ${platformId}`, 'i'),
       `the error asks for the directory to be renamed back: ${result.stderr}`,
     );
     assert.doesNotMatch(
@@ -1039,12 +819,11 @@ test('renaming a platform directory refuses to start and asks for the directory 
 test('a seed port outside the valid range fails instead of walking', async () => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-bad-port-'));
   try {
-    const result = await runToExit({ dataDir: dataRoot, port: 99_999 });
+    const result = await runToExit({ dataDir: dataRoot, platformId: 'p_0bad0001', port: 99_999 });
     assert.equal(result.code, 1, 'an unusable port is a startup failure, not a reason to walk');
     assert.equal(result.stdout.trim(), '', 'no readiness line');
     assert.match(result.stderr, /cannot listen on 99999:/, result.stderr);
     assert.deepEqual(await platformDirs(dataRoot), [], 'the failed start removed the empty platform directory');
-    assert.equal(existsSync(startLockPath(dataRoot)), false, 'the failed start left no startup lock');
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
   }
@@ -1067,19 +846,13 @@ test('readEndpoint ignores a record whose port is not a usable port', async () =
     writeFileSync(endpointPath(dataRoot, platformId), JSON.stringify([]));
     assert.equal(readEndpoint(dir), null, 'an array is not a record');
 
-    // A record without a pid is still usable as a port hint; it just cannot
-    // testify about the process, so `identifyHolder` refuses it.
+    // A record without a pid cannot identify a holder; it is not a valid
+    // record, and the caller must fail closed rather than treat it as a hint.
     writeFileSync(
       endpointPath(dataRoot, platformId),
       JSON.stringify({ platform_id: platformId, port: 7717, version: '0.6.0', updated_at: 1 }),
     );
-    assert.deepEqual(readEndpoint(dir), {
-      platform_id: platformId,
-      port: 7717,
-      version: '0.6.0',
-      pid: 0,
-      updated_at: 1,
-    });
+    assert.equal(readEndpoint(dir), null, 'a record without a pid is not usable');
   } finally {
     await rm(dataRoot, { recursive: true, force: true });
   }
@@ -1108,8 +881,8 @@ test('a startup that meets a platform blocked opening its database exits 2 from 
     raw = spawnRaw({ dataDir: dataRoot, platformId, seedPort: seed });
     const deadline = Date.now() + 5_000;
     let record = readEndpoint(join(dataRoot, 'platforms', platformId));
-    while (record === null || record.pid !== raw.pid) {
-      if (Date.now() >= deadline) throw new Error(`no endpoint record for the blocked platform\n${raw.stderr()}`);
+    while (record === null || record.pid !== raw.pid || !(await isListening(record.port))) {
+      if (Date.now() >= deadline) throw new Error(`no bound endpoint record for the blocked platform\n${raw.stderr()}`);
       await new Promise((resolve) => setTimeout(resolve, 20));
       record = readEndpoint(join(dataRoot, 'platforms', platformId));
     }
@@ -1226,7 +999,6 @@ test('a second start of the same platform exits 2 and leaves the first one servi
       'the duplicate never opened the database',
     );
     assert.deepEqual(await platformDirs(dataRoot), [identity], 'no second platform directory appeared');
-    assert.equal(existsSync(startLockPath(dataRoot)), false, 'the duplicate left no startup lock');
     assert.equal(
       readFileSync(logPath, 'utf8').split('\n').filter((line) => line !== '').length,
       logLinesBefore,
@@ -1291,37 +1063,12 @@ test('a bind error that is not EADDRINUSE fails without leaving an empty platfor
   }
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-eacces-'));
   try {
-    const result = await runToExit({ dataDir: dataRoot, port: 1 });
+    const result = await runToExit({ dataDir: dataRoot, platformId: 'p_0eac0001', port: 1 });
     assert.equal(result.code, 1, 'a bind error is a startup failure');
     assert.equal(result.stdout.trim(), '', 'no readiness line');
     assert.match(result.stderr, /cannot listen on 1:/, result.stderr);
     assert.deepEqual(await platformDirs(dataRoot), [], 'the failed start removed the empty platform directory');
-    assert.equal(existsSync(startLockPath(dataRoot)), false, 'the failed start left no startup lock');
   } finally {
-    await rm(dataRoot, { recursive: true, force: true });
-  }
-});
-
-test('an occupied seed port still adopts a 0.2.0 database and serves on the next port', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-listen-legacy-'));
-  const rootDb = join(dataRoot, 'pigroups.db');
-  const held = await holdHttpPort();
-  let server: Server | undefined;
-  try {
-    writeOldDatabase(rootDb);
-    writeFileSync(`${rootDb}-wal`, 'fake-wal-contents');
-
-    server = await startServer({ dataDir: dataRoot, seedPort: held.port });
-    assert.ok(server.port > held.port, `served on ${server.port}, past the occupied ${held.port}`);
-    assert.equal(existsSync(rootDb), false, 'the old database left the data root');
-    assert.equal(existsSync(`${rootDb}-wal`), false, 'the old WAL moved with it');
-
-    const identity = String((await health(server)).platform_id);
-    assert.ok(existsSync(databasePath(dataRoot, identity)), 'the adopted database lives in the platform directory');
-    assert.equal(readEndpointRecord(dataRoot, identity).port, server.port, 'the endpoint follows the adopted platform');
-  } finally {
-    if (server) await server.stop();
-    await held.release();
     await rm(dataRoot, { recursive: true, force: true });
   }
 });
@@ -1329,44 +1076,59 @@ test('an occupied seed port still adopts a 0.2.0 database and serves on the next
 test('the endpoint record is written before the database is opened', async () => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-order-'));
   const platformId = 'p_0abc0001';
-  const dbPath = databasePath(dataRoot, platformId);
+  let locker: DatabaseSync | undefined;
+  let raw: ReturnType<typeof spawnRaw> | undefined;
   try {
-    mkdirSync(join(dataRoot, 'platforms', platformId), { recursive: true });
-    writeFileSync(dbPath, 'not a sqlite database');
-    const before = readFileSync(dbPath);
-    const port = await freePortNumber();
+    const first = await startServer({ dataDir: dataRoot, platformId });
+    await first.stop();
 
-    const result = await runToExit({ dataDir: dataRoot, platformId, port });
-    assert.equal(result.code, 1, 'a database that cannot be opened is a startup failure');
-    assert.equal(result.stdout.trim(), '', 'no readiness line');
-    assert.ok(result.stderr.includes(dbPath), `the error names the database: ${result.stderr}`);
+    locker = new DatabaseSync(databasePath(dataRoot, platformId), { timeout: 5_000 });
+    locker.exec('BEGIN IMMEDIATE');
+    const seed = await freePortNumber();
+    raw = spawnRaw({ dataDir: dataRoot, platformId, seedPort: seed });
 
-    // The record exists even though the database never opened: it is written
-    // between the bind and the open, which is the whole point of the record.
-    const record = readEndpointRecord(dataRoot, platformId);
+    const deadline = Date.now() + 5_000;
+    let record = readEndpoint(join(dataRoot, 'platforms', platformId));
+    while (record === null || record.pid !== raw.pid || !(await isListening(record.port))) {
+      if (Date.now() >= deadline) throw new Error(`no bound endpoint record\n${raw.stderr()}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      record = readEndpoint(join(dataRoot, 'platforms', platformId));
+    }
+
     assert.deepEqual(
       Object.keys(record).sort(),
       ['pid', 'platform_id', 'port', 'updated_at', 'version'],
       'the record has exactly the documented keys',
     );
     assert.equal(record.platform_id, platformId);
-    assert.equal(record.port, port, 'the record names the port that was bound');
-    assert.equal(record.pid, result.pid, 'the record names the process that bound it');
+    assert.equal(record.pid, raw.pid, 'the record names the process that bound it');
     assert.equal(typeof record.version, 'string');
     assert.ok(Math.abs(Date.now() - record.updated_at) < 60_000, 'updated_at is a recent Unix ms');
-
-    assert.ok(readFileSync(dbPath).equals(before), 'the failed open did not rewrite the database');
+    assert.equal(
+      statSync(endpointPath(dataRoot, platformId)).mode & 0o777,
+      0o600,
+      'the endpoint record is 0600',
+    );
     assert.deepEqual(
       readdirSync(join(dataRoot, 'platforms', platformId)).filter((name) => name.includes('.tmp')),
       [],
       'the atomic write left no temp file',
     );
-    assert.ok(existsSync(join(dataRoot, 'platforms', platformId)), 'a directory holding a record is not removed');
   } finally {
+    try {
+      locker?.exec('ROLLBACK');
+    } catch {
+      // already rolled back
+    }
+    try {
+      locker?.close();
+    } catch {
+      // already closed
+    }
+    raw?.kill('SIGKILL');
     await rm(dataRoot, { recursive: true, force: true });
   }
 });
-
 test('SIGKILL leaves the record, and the next start reuses its port and data', async () => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-sigkill-'));
   let server: Server | undefined;
@@ -1420,7 +1182,9 @@ test('a positive platform_id on the second probe alone exits 2', async () => {
     const requests = held.requests();
     assert.equal(requests.length, 2, 'exactly the two probes, no third');
     assert.ok(requests[1].at - requests[0].at >= 140, 'the probes are separated by the documented pause');
-    assert.equal(existsSync(endpointPath(dataRoot, platformId)), false, 'a duplicate writes no record');
+    const claim = readEndpoint(join(dataRoot, 'platforms', platformId));
+    assert.equal(claim?.port, held.port, 'the first-start claim names the contested port');
+    assert.equal(claim?.pid, result.pid, 'the claim names the process that made it');
     assert.equal(existsSync(databasePath(dataRoot, platformId)), false, 'a duplicate opens no database');
   } finally {
     await held.release();
@@ -1537,7 +1301,6 @@ test('two established platforms in one data root start at the same time', async 
     for (const server of started) ids.add(String((await health(server)).platform_id));
     assert.deepEqual([...ids].sort(), [first, second], 'each server reports its own platform');
     assert.notEqual(started[0].port, started[1].port, 'they do not share a port');
-    assert.equal(existsSync(startLockPath(dataRoot)), false, 'no startup lock is left behind');
     assert.deepEqual((await platformDirs(dataRoot)).sort(), [first, second]);
   } finally {
     for (const server of started) await server.stop();
@@ -1566,64 +1329,62 @@ test('a holder that only listens on ::1 is left after both probes', async (t) =>
   }
 });
 
-test('an endpoint record naming another platform is ignored', async () => {
+test('an endpoint record naming another platform refuses to start', async () => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-endpoint-foreign-'));
-  let server: Server | undefined;
+  const foreign = 'p_00000000';
+  let first: Server | undefined;
   try {
-    server = await startServer({ dataDir: dataRoot });
-    const identity = String((await health(server)).platform_id);
-    await server.stop();
-    server = undefined;
+    first = await startServer({ dataDir: dataRoot });
+    const identity = String((await health(first)).platform_id);
+    await first.stop();
+    first = undefined;
 
-    const free = await holdPort();
-    try {
-      writeFileSync(
-        endpointPath(dataRoot, identity),
-        JSON.stringify({ platform_id: 'p_00000000', port: free.port, version: '0.0.0', pid: process.pid, updated_at: 0 }),
-      );
-      const seed = await holdHttpPort();
-      try {
-        server = await startServer({ dataDir: dataRoot, seedPort: seed.port });
-        assert.notEqual(server.port, free.port, 'a record naming another platform is not followed');
-        assert.ok(server.port > seed.port, 'the platform advanced past the occupied seed port');
-        assert.equal(String((await health(server)).platform_id), identity, 'the same platform came back');
-        assert.equal(readEndpointRecord(dataRoot, identity).platform_id, identity, 'the record was rewritten');
-      } finally {
-        await seed.release();
-      }
-    } finally {
-      await free.release();
-    }
+    writeFileSync(
+      endpointPath(dataRoot, identity),
+      JSON.stringify({
+        platform_id: foreign,
+        port: await freePortNumber(),
+        version: '0.0.0',
+        pid: process.pid,
+        updated_at: Date.now(),
+      }),
+    );
+
+    const result = await runToExit({ dataDir: dataRoot });
+    assert.equal(result.code, 1, 'a foreign record is not followed');
+    assert.equal(result.stdout.trim(), '', 'no readiness line');
+    assert.match(result.stderr, new RegExp(`names platform ${foreign}`), result.stderr);
+    assert.match(result.stderr, new RegExp(identity), `the error names the directory id: ${result.stderr}`);
+    assert.match(result.stderr, /rename the directory back/i, result.stderr);
+    assert.equal(readEndpointRecord(dataRoot, identity).platform_id, foreign, 'the record is not rewritten');
+    assert.ok(existsSync(databasePath(dataRoot, identity)), 'the database is untouched');
   } finally {
-    if (server) await server.stop();
+    if (first) await first.stop();
     await rm(dataRoot, { recursive: true, force: true });
   }
 });
-
-test('a malformed endpoint record is ignored and the seed port is used', async () => {
+test('a malformed endpoint record refuses to start', async () => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-endpoint-broken-'));
-  let server: Server | undefined;
+  let first: Server | undefined;
   try {
-    server = await startServer({ dataDir: dataRoot });
-    const identity = String((await health(server)).platform_id);
-    await server.stop();
-    server = undefined;
+    first = await startServer({ dataDir: dataRoot });
+    const identity = String((await health(first)).platform_id);
+    await first.stop();
+    first = undefined;
 
     writeFileSync(endpointPath(dataRoot, identity), '{not json');
-    const seed = await holdHttpPort();
-    try {
-      server = await startServer({ dataDir: dataRoot, seedPort: seed.port });
-      assert.ok(server.port > seed.port, 'a broken record has no authority over the seed');
-      assert.equal(readEndpointRecord(dataRoot, identity).port, server.port, 'the record was replaced');
-    } finally {
-      await seed.release();
-    }
+    const result = await runToExit({ dataDir: dataRoot });
+    assert.equal(result.code, 1, 'an unreadable record is not ignored');
+    assert.equal(result.stdout.trim(), '', 'no readiness line');
+    assert.match(result.stderr, /not a readable endpoint record/, result.stderr);
+    assert.match(result.stderr, /Remove it by hand/, result.stderr);
+    assert.equal(readFileSync(endpointPath(dataRoot, identity), 'utf8'), '{not json', 'the record is not unlinked');
+    assert.ok(existsSync(databasePath(dataRoot, identity)), 'the database is untouched');
   } finally {
-    if (server) await server.stop();
+    if (first) await first.stop();
     await rm(dataRoot, { recursive: true, force: true });
   }
 });
-
 test('the last candidate port does not wrap around', async (t) => {
   const held = await holdHttpAt(65_535);
   if (held === undefined) {
@@ -1632,7 +1393,7 @@ test('the last candidate port does not wrap around', async (t) => {
   }
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-overflow-'));
   try {
-    const result = await runToExit({ dataDir: dataRoot, port: 65_535 });
+    const result = await runToExit({ dataDir: dataRoot, platformId: 'p_0fff0002', port: 65_535 });
     assert.equal(result.code, 1, 'there is no port above 65535 to advance to');
     assert.equal(result.stdout.trim(), '', 'no readiness line');
     assert.match(result.stderr, /cannot listen on any port from 65535 to 65535/, result.stderr);
@@ -1662,16 +1423,163 @@ test('a holder that only listens on another loopback address is left after both 
   }
 });
 
-test('an explicit platform id without an endpoint record takes the start lock', async () => {
+test('an explicit platform id without a record creates the endpoint claim, and a stray .start.lock is ignored', async () => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-lock-explicit-'));
+  const platformId = 'p_0aaa0001';
+  let first: Server | undefined;
+  let second: Server | undefined;
   try {
-    const lockPath = writeStartLock(dataRoot, { pid: process.pid, at: Date.now() });
-    const result = await runToExit({ dataDir: dataRoot, platformId: 'p_0aaa0001' });
-    assert.equal(result.code, 1, 'a first start with no record must not run beside another starter');
-    assert.match(result.stderr, /another process/, result.stderr);
-    assert.ok(existsSync(lockPath), 'the live holder keeps its lock');
-    assert.equal(existsSync(join(dataRoot, 'platforms', 'p_0aaa0001', 'pigroups.db')), false, 'no database was opened');
+    first = await startServer({ dataDir: dataRoot, platformId });
+    assert.equal(String((await health(first)).platform_id), platformId);
+    assert.ok(existsSync(join(dataRoot, 'platforms', platformId, 'endpoint.json')), 'the endpoint claim exists');
+    assert.equal(existsSync(join(dataRoot, 'platforms', '.start.lock')), false, 'the server creates no startup lock');
+    await first.stop();
+    first = undefined;
+
+    writeFileSync(
+      join(dataRoot, 'platforms', '.start.lock'),
+      JSON.stringify({ pid: process.pid, at: Date.now() }),
+    );
+    second = await startServer({ dataDir: dataRoot, platformId });
+    assert.equal(String((await health(second)).platform_id), platformId, 'a stray lock does not block');
+    assert.ok(existsSync(join(dataRoot, 'platforms', '.start.lock')), 'the stray file is not part of startup');
   } finally {
+    if (first) await first.stop();
+    if (second) await second.stop();
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+test('a 0.2.0 root database without a platform is refused and left in place', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-legacy-root-'));
+  const rootDb = join(dataRoot, 'pigroups.db');
+  try {
+    writeOldDatabase(rootDb);
+    writeFileSync(`${rootDb}-wal`, 'old wal');
+
+    const result = await runToExit({ dataDir: dataRoot });
+    assert.equal(result.code, 1, 'the 0.2 layout is not adopted');
+    assert.match(result.stderr, /0\.2\.0 layout/, result.stderr);
+    assert.ok(existsSync(rootDb), 'the root database is left alone');
+    assert.ok(existsSync(`${rootDb}-wal`), 'the root WAL is left alone');
+    assert.deepEqual(await platformDirs(dataRoot), [], 'no platform directory is created');
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('a record-less first start claims the seed port before binding', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-seed-claim-'));
+  const platformId = 'p_0c1a0001';
+  const held = await holdPort();
+  let raw: ReturnType<typeof spawnRaw> | undefined;
+  try {
+    raw = spawnRaw({ dataDir: dataRoot, platformId, seedPort: held.port });
+
+    const deadline = Date.now() + 5_000;
+    let record = readEndpoint(join(dataRoot, 'platforms', platformId));
+    while (record === null || record.pid !== raw.pid) {
+      if (Date.now() >= deadline) throw new Error(`no endpoint claim\n${raw.stderr()}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      record = readEndpoint(join(dataRoot, 'platforms', platformId));
+    }
+    assert.equal(record.platform_id, platformId);
+    assert.equal(record.port, held.port, 'the claim names the seed before the bind');
+    assert.equal(record.pid, raw.pid);
+
+    const ready = Date.now() + 10_000;
+    for (;;) {
+      const current = readEndpoint(join(dataRoot, 'platforms', platformId));
+      if (current !== null && current.port > held.port && (await isListening(current.port))) break;
+      if (Date.now() >= ready) throw new Error(`the platform never advanced past the seed\n${raw.stderr()}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    raw.kill('SIGTERM');
+  } finally {
+    raw?.kill('SIGKILL');
+    await held.release();
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('a failed start keeps an existing record port rendezvous', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-failed-existing-'));
+  const platformId = 'p_0fa10001';
+  try {
+    mkdirSync(join(dataRoot, 'platforms', platformId), { recursive: true });
+    writeFileSync(databasePath(dataRoot, platformId), 'not a sqlite database');
+    const port = await freePortNumber();
+    writeFileSync(
+      endpointPath(dataRoot, platformId),
+      JSON.stringify({
+        platform_id: platformId,
+        port,
+        version: '0.6.0',
+        pid: deadPid(),
+        updated_at: Date.now(),
+      }),
+    );
+
+    const result = await runToExit({ dataDir: dataRoot, platformId });
+    assert.equal(result.code, 1, 'a database that cannot be opened is a startup failure');
+    const after = readEndpointRecord(dataRoot, platformId);
+    assert.equal(after.port, port, 'the port rendezvous survives');
+    assert.equal(after.pid, result.pid, 'the failed process wrote the record after its bind');
+    assert.ok(existsSync(endpointPath(dataRoot, platformId)), 'the existing record is not removed');
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('an invalid PORT is ignored when a valid record exists', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-bad-seed-recorded-'));
+  const platformId = 'p_0bad0002';
+  let first: Server | undefined;
+  let second: Server | undefined;
+  try {
+    first = await startServer({ dataDir: dataRoot, platformId });
+    const port = first.port;
+    await first.stop();
+    first = undefined;
+
+    second = await startServer({ dataDir: dataRoot, platformId, seedPort: 99_999 });
+    assert.equal(second.port, port, 'the recorded port wins over an invalid seed');
+    assert.equal(String((await health(second)).platform_id), platformId);
+  } finally {
+    if (first) await first.stop();
+    if (second) await second.stop();
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('two first starters walk past an occupied seed together and leave one server', async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), 'pigroups-platforms-race-walk-'));
+  const platformId = 'p_0c1a0002';
+  const held = await holdPort();
+  const started: Server[] = [];
+  try {
+    const outcomes = await Promise.allSettled([
+      startServer({ dataDir: dataRoot, platformId, seedPort: held.port }),
+      startServer({ dataDir: dataRoot, platformId, seedPort: held.port }),
+    ]);
+    for (const outcome of outcomes) {
+      if (outcome.status === 'fulfilled') started.push(outcome.value);
+    }
+    const failures = outcomes.flatMap((outcome) =>
+      outcome.status === 'rejected' ? [String(outcome.reason)] : [],
+    );
+    for (const text of failures) {
+      assert.match(text, /exited \(code=2/, `the loser exits 2: ${text}`);
+      assert.doesNotMatch(text, /listening on/, `the loser never became ready: ${text}`);
+    }
+    assert.equal(started.length, 1, 'exactly one process serves the platform');
+    const winner = started[0];
+    assert.ok(winner.port > held.port, `the winner advanced past ${held.port}`);
+    const record = readEndpointRecord(dataRoot, platformId);
+    assert.equal(record.port, winner.port, 'the record names the winning port');
+    assert.equal(record.pid, winner.pid, 'the record names the winning process');
+  } finally {
+    for (const server of started) await server.stop();
+    await held.release();
     await rm(dataRoot, { recursive: true, force: true });
   }
 });

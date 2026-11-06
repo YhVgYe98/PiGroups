@@ -10,7 +10,8 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { createServer, type Socket } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -171,11 +172,19 @@ export async function startServer(options: StartOptions = {}): Promise<Server> {
       : await mkdtemp(join(tmpdir(), 'pigroups-test-')));
   if (!ownsDataDir && options.createDataDir !== false) await mkdir(dataDir, { recursive: true });
 
+  // Production refuses an empty data root without an id; the harness mints one
+  // so a test that only cares about HTTP does not have to name it. An existing
+  // platform keeps its id (the server reuses it), and an explicit id always wins.
+  const platformId =
+    options.platformId ??
+    (hasPlatformDatabase(dataDir) ? undefined : `p_${randomBytes(4).toString('hex')}`);
+  const effective: StartOptions = { ...options, platformId };
+
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     const port = options.seedPort ?? (await findFreePort());
     try {
-      return await spawnServer(port, options, { ownsDataDir, cwd, dataDir });
+      return await spawnServer(port, effective, { ownsDataDir, cwd, dataDir });
     } catch (error) {
       lastError = error;
       if (!String(error).includes('EADDRINUSE') || attempt === 2) break;
@@ -417,19 +426,24 @@ export function databasePath(dataRoot: string, platformId: string): string {
   return join(dataRoot, 'platforms', platformId, 'pigroups.db');
 }
 
-export function startLockPath(dataRoot: string): string {
-  return join(dataRoot, 'platforms', '.start.lock');
+/** True when the data root already holds at least one platform database. */
+function hasPlatformDatabase(dataDir: string): boolean {
+  const platformsDir = join(dataDir, 'platforms');
+  try {
+    return readdirSync(platformsDir, { withFileTypes: true }).some((entry) => {
+      if (!entry.isDirectory()) return false;
+      try {
+        return statSync(join(platformsDir, entry.name, 'pigroups.db')).isFile();
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
 }
 
-/** Write a startup lock by hand; a string is written verbatim, anything else as JSON. */
-export function writeStartLock(dataRoot: string, contents: unknown): string {
-  mkdirSync(join(dataRoot, 'platforms'), { recursive: true });
-  const lockPath = startLockPath(dataRoot);
-  writeFileSync(lockPath, typeof contents === 'string' ? contents : JSON.stringify(contents));
-  return lockPath;
-}
-
-/** A pid that is guaranteed not to be running, for a stale-lock fixture. */
+/** A pid that is guaranteed not to be running, for a dead-holder record fixture. */
 export function deadPid(): number {
   for (let pid = 999_999; pid > 1000; pid--) {
     try {
