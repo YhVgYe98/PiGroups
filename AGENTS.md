@@ -24,26 +24,26 @@ Documents are Chinese. Code, comments, commit messages, test names, and anything
   - **One data root holds every platform.** The database is
     `<PIGROUPS_DATA>/platforms/<platform_id>/pigroups.db`, pinned by `docs/设计说明.md` §11.
     A test that needs the file asks `GET /v1/health` for `platform_id` first; it never guesses the name.
-  - `PIGROUPS_PLATFORM_ID` selects the platform. Without it the server reuses the only one,
-    creates one in an empty root, and refuses to start when the choice is ambiguous.
+  - `PIGROUPS_PLATFORM_ID` selects the platform. Without it the server reuses the only
+    existing platform; an empty root is refused (the adapter always names a new platform).
     A platform is a directory under `platforms/` that holds a `pigroups.db` **file**; an empty
     directory is not one. An explicit id is used verbatim and must be a single directory name
-    (`/`, `\`, `.`, `..` and the lock file name are refused).
-  - A data root that still has the 0.2.0 layout (`<PIGROUPS_DATA>/pigroups.db`) is adopted once
-    at startup, but only when `platforms/` is still empty: the file and its `-wal`/`-shm`/`-journal`
-    move into a platform directory (the explicit id if one was given, otherwise a fresh one).
-    A root database next to an existing platform refuses to start, even with an explicit id.
-  - Startup takes `<PIGROUPS_DATA>/platforms/.start.lock` while it looks for a platform and
-    opens the database. A concurrent start in the same root whose holder is still alive is
-    refused immediately (not queued). The lock picks an id, adopts a legacy database, and
-    covers the first start of a platform that has no endpoint record yet (two starters with
-    different PORT values would otherwise bind different ports and open one database). A
-    platform that already has a record skips the lock: its port is the rendezvous. The lock
-    is not the runtime single-instance check.
+    (`/`, `\`, `.`, `..` are refused).
+  - A data root that still has the 0.2.0 layout (`<PIGROUPS_DATA>/pigroups.db`) is refused.
+    Stop the platform and move `pigroups.db` (and its `-wal`/`-shm`/`-journal` if present) into
+    a platform directory by hand, then start with that explicit id. There is no adoption path.
+  - The first start of a platform with no record creates `platforms/<id>/endpoint.json` with
+    the seed candidate (`wx`, mode 0600) before binding. If a candidate is occupied by a
+    foreign service, the starter publishes the next candidate before trying it, so a second
+    starter follows the same port. A record owned by another live platform is never overwritten.
+    There is no `.start.lock`: the record is the port rendezvous, and the bind is the lock.
   - The listener is bound *before* the database is opened, and held for the life of the
     process: the bind is the single-instance lock. `platforms/<id>/endpoint.json` records
-    `{platform_id, port, version, pid, updated_at}` right after the bind, and is the address a
-    client or a later start uses. It is a hint, not proof of ownership.
+    `{platform_id, port, version, pid, updated_at}`: it is created with the first candidate,
+    updated to each candidate the starter walks to, and rewritten with the bound port. It is
+    the address a client or a later start uses, and the witness for a platform blocked opening
+    its database; it is not proof of ownership. An existing record that cannot be read is
+    fail-closed (a human removes it)
   - A candidate held by the same platform exits `2` without touching data. Every other outcome
     (another platform, a non-PiGroups service, a refused connection, a timeout) gets a second
     probe, and two probes that do not name this platform move to the next port. A bound

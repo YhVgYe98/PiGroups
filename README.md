@@ -16,13 +16,14 @@ npm run typecheck
 ```
 
 One data root holds every platform (`<PIGROUPS_DATA>/platforms/<id>/pigroups.db`); without
-`PIGROUPS_PLATFORM_ID` the server reuses the only platform, or creates one in an empty root,
-and refuses to start when the choice is ambiguous.
+`PIGROUPS_PLATFORM_ID` the server reuses the only platform and refuses an empty root, and it
+refuses to start when the choice is ambiguous. A new platform is always named by the adapter.
 
-One platform is served by one process. The listening socket is the lock: the platform binds
-before it opens the database, records the port it got in `platforms/<id>/endpoint.json`, and
-exits `2` when another process already serves the same platform. `PORT` only seeds a platform
-that has no endpoint record yet.
+One platform is served by one process. The listening socket is the lock: the platform creates
+`platforms/<id>/endpoint.json` with its seed candidate before binding, publishes each candidate
+it walks to, rewrites it with the bound port, and only then opens the database. It exits `2`
+when another process already serves the same platform. `PORT` only seeds a platform that has no
+endpoint record yet. There is no `.start.lock`; the record is the port rendezvous.
 
 `AGENTS.md` holds the working rules: file ownership, the runtime contract, and
 the isolation rule that the implementation and the test suite are written and

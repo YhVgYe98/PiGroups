@@ -5,6 +5,26 @@
 文档化的行为改变、数据迁移）。平台与适配器作为一套系统推进，但版本号各自独立；
 适配器的 build metadata 记录它验证过的平台。
 
+## v0.7.0 — 2026-11-06
+
+### 启动锁删除：endpoint.json 作为首次启动的端口会合点
+
+- **删除 `platforms/.start.lock`** 及 `acquireStartLock` / `stealAbandonedLock` / `lockIsAbandoned`。
+  首次启动没有记录时，用 `wx` 创建 `endpoint.json`（`0600`），写入 seed 端口；第二个 starter
+  读同一个记录、绑同一个端口，由 bind 裁决。候选被别的服务占住时，前进到 `n + 1` 并在尝试之前
+  把记录改成 `n + 1`，让两个 starter 继续会合；已有记录、且 pid 是另一个活进程时，不覆盖它。
+- **删除 0.2.0 旧库接纳**：`adoptLegacyDatabase`、`adoptionTarget`、`listHalfAdoptedIds`、
+  EXDEV 处理及半接纳目录。根上有 0.2.0 的 `pigroups.db` 一律拒绝启动；停平台后人工把库和侧车
+  搬进 `platforms/<id>/`，再用该 id 启动。
+- **空数据根必须显式给 `PIGROUPS_PLATFORM_ID`**：不再随机生成 id；恰好一个已有平台仍可无 id 复用，
+  多个仍拒绝。
+- **记录读取更严格**：缺端口、缺 pid、或内容不可读的记录都是 fail-closed，要求人工删除；
+  不再"忽略并用 seed 启动"。首次启动先创建 claim、随后发现同平台 holder 的，保留 claim 作为
+  rendezvous；已有记录的 duplicate 仍不写记录。
+- **失败启动的清理**：只删除自己创建、且 pid 仍是自己的记录；已有记录保留；只有空目录才删。
+- `endpoint.json` 仍为 `{platform_id, port, version, pid, updated_at}`，整数端口、`0600`、
+  原子写；0.6.0 的记录形状不变。
+
 ## v0.6.0 — 2026-11-06
 
 ### 一个平台只由一个进程服务：端口就是那把锁
@@ -28,7 +48,7 @@
 - 间隔 150 ms 探测两次 `GET /v1/health`；
 - 任一次报告**相同的 `platform_id`** → 同一个平台，退出码 **2**，不碰数据；
 - 任一次给出**有把握的"不是我们"**（另一个 `platform_id`，或不是 PiGroups 的 HTTP 响应）→ 试 `n + 1`；
-- 两次都**没有答复** → 拒绝启动，报错。
+- 两次都**没有答复** → 换下一个端口（没有"拒绝启动"档）。
 
 判据只有一个正向答案：`platform_id` 是本平台。别的平台、不是 PiGroups 的响应、`ECONNREFUSED`、
 超时，都算"没答上来"，一律再探一次；两次都没有就换下一个端口——这是给正向答案两次机会，
