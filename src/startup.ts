@@ -13,10 +13,11 @@
  * next port.
  *
  * The one answer that does not come from the network is the platform's own
- * record. It is written between the bind and the synchronous database open, so
- * it can carry the same `platform_id` and port while the event loop is blocked
- * and both probes time out. Without it, a platform opening a large database
- * would be classified as "not us" and a second process would open the same file.
+ * record. It is created before the bind with the current candidate and rewritten
+ * after it, so it can carry the same `platform_id` and port while the event loop
+ * is blocked and both probes time out. Without it, a platform opening a large
+ * database would be classified as "not us" and a second process would open the
+ * same file.
  */
 
 import type { Server as HttpServer } from 'node:http';
@@ -105,11 +106,18 @@ export async function bindPlatformPort(options: {
    * blocked opening its database.
    */
   identifyHolder?: () => { port: number } | undefined;
+  /**
+   * Called with every candidate before it is tried. The record is the rendezvous:
+   * a starter that walks past an occupied seed must publish the new candidate so a
+   * competitor follows it instead of binding the abandoned seed.
+   */
+  onCandidate?: (port: number) => void;
 }): Promise<{ port: number }> {
   const { platformId, server } = options;
   let port = options.firstPort;
 
   for (;;) {
+    options.onCandidate?.(port);
     try {
       await listen(server, port);
       return { port };
