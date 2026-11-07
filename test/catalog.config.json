@@ -103,6 +103,10 @@
     "version.test.ts": {
       "type": "contract",
       "area": "version"
+    },
+    "package.test.ts": {
+      "type": "tooling",
+      "area": "package"
     }
   },
   "cases": [

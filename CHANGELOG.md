@@ -3,7 +3,18 @@
 本文件记录 PiGroups 平台对外可见的变化。版本号怎么取，见 `docs/设计说明.md` §16：
 0.x 的补丁位只修不改变契约的缺陷；次版本位用于契约变化（字段/端点/接口成员增删、
 文档化的行为改变、数据迁移）。平台与适配器作为一套系统推进，但版本号各自独立；
-适配器的 build metadata 记录它验证过的平台。
+适配器在 `package.json` 中记录它精确依赖的平台版本。
+
+## 0.7.1 — 2026-11-08
+
+### 可发布的 npm 平台包
+
+- `private: false`、MIT license、description/repository。
+- 明确 `files`：只发布 `src`、`bin`、README/CHANGELOG/LICENSE 与设计文档；不发布 test/AGENTS。
+- 新增 `bin/pigroups.js` 与 `bin.pigroups`；`exports` 暴露 `./package.json` 供适配器解析。
+- `src/version.ts` 仍只读 `package.json`；server 行为不变。
+- 适配器 `0.17.0` 精确依赖本版本。
+- 测试：132 条全绿；新增 package/tarball 内容检查。
 
 ## v0.7.0 — 2026-11-06
 

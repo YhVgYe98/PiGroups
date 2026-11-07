@@ -1,7 +1,7 @@
 {
   "name": "pigroups",
-  "version": "0.7.0",
-  "private": true,
+  "version": "0.7.1",
+  "private": false,
   "type": "module",
   "engines": {
     "node": ">=24"
@@ -11,7 +11,9 @@
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "test:catalog": "node test/catalog.ts",
-    "test:catalog:check": "node test/catalog.ts --check"
+    "test:catalog:check": "node test/catalog.ts --check",
+    "test:package": "node --test test/package.test.ts",
+    "prepublishOnly": "npm run typecheck && npm test && npm run test:catalog:check && npm run test:package"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.0",
@@ -21,5 +23,26 @@
   "devDependencies": {
     "@types/node": "^22.13.0",
     "typescript": "^5.7.0"
+  },
+  "license": "MIT",
+  "description": "PiGroups platform: a local multi-agent workspace server.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YhVgYe98/PiGroups.git"
+  },
+  "files": [
+    "src",
+    "bin",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "docs/设计说明.md",
+    "docs/概念稿.md"
+  ],
+  "bin": {
+    "pigroups": "bin/pigroups.js"
+  },
+  "exports": {
+    "./package.json": "./package.json"
   }
 }

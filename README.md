@@ -8,8 +8,9 @@ consume-on-read inbox, one opaque instruction channel.
 - `docs/参考/` — the original design conversation.
 
 ```bash
-npm install
-PIGROUPS_ADMIN_TOKEN=... npm run serve            # PORT=7717 PIGROUPS_DATA=./.pigroups
+npm install pigroups
+npx pigroups                                      # PORT=7717 PIGROUPS_DATA=./.pigroups
+PIGROUPS_ADMIN_TOKEN=... npx pigroups             # enable the human/admin surface
 PIGROUPS_PLATFORM_ID=p_xxxxxxxx npm run serve     # when the root holds more than one platform
 npm test                                          # black-box tests, each with its own data root
 npm run typecheck
@@ -29,4 +30,4 @@ endpoint record yet. There is no `.start.lock`; the record is the port rendezvou
 the isolation rule that the implementation and the test suite are written and
 reviewed without either side seeing the other.
 
-The Pi adapter and the project handoff live in `../pigroups-adapter` (see its `docs/handoff.md`).
+The Pi adapter lives in `../pigroups-adapter`; its published package depends on this one.
