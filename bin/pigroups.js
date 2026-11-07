@@ -1,2 +1,2 @@
 #!/usr/bin/env node
-import '../src/main.ts';
+import '../dist/main.js';

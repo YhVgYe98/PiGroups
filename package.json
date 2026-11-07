@@ -1,6 +1,6 @@
 {
   "name": "pigroups",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "private": false,
   "type": "module",
   "engines": {
@@ -13,7 +13,9 @@
     "test:catalog": "node test/catalog.ts",
     "test:catalog:check": "node test/catalog.ts --check",
     "test:package": "node --test test/package.test.ts",
-    "prepublishOnly": "npm run typecheck && npm test && npm run test:catalog:check && npm run test:package"
+    "prepublishOnly": "npm run build && npm run typecheck && npm test && npm run test:catalog:check && npm run test:package",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.0",
@@ -31,7 +33,7 @@
     "url": "git+https://github.com/YhVgYe98/PiGroups.git"
   },
   "files": [
-    "src",
+    "dist",
     "bin",
     "README.md",
     "CHANGELOG.md",

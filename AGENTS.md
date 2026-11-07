@@ -57,6 +57,7 @@ Documents are Chinese. Code, comments, commit messages, test names, and anything
 - `npm test` → `node --test test/*.test.ts`
 - `npm run typecheck` → `tsc --noEmit`
 - `npm run test:catalog` regenerates `test/CATALOG.md`; every `test/*.test.ts` file must be classified in `test/catalog.config.json` (mixed files use per-case overrides). The catalog test fails on a stale index or an unclassified case.
+- `.github/workflows/ci.yml` tests source plus a local tarball. `.github/workflows/smoke.yml` installs the published package from npm; it runs daily and on `workflow_dispatch`.
 
 `package.json`, `tsconfig.json`, `AGENTS.md`, `README.md`, and `docs/**` are owned by the boss. Do not edit them. Need a dependency or a script? Ask.
 

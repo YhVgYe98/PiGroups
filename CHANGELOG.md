@@ -5,6 +5,16 @@
 文档化的行为改变、数据迁移）。平台与适配器作为一套系统推进，但版本号各自独立；
 适配器在 `package.json` 中记录它精确依赖的平台版本。
 
+## 0.7.2 — 2026-11-08
+
+### 可发布的平台运行时
+
+- 新增 `tsconfig.build.json` 和 `dist/` 构建；`bin/pigroups.js` 指向 `dist/main.js`。
+- 平台包不再发布 `src/*.ts` 作为运行时：Node 24/26 拒绝在 `node_modules` 下做 TypeScript type stripping，
+  0.7.1 的 `bin` 会在安装后启动失败。
+- `files` 改为 `dist` + `bin` + README/CHANGELOG/LICENSE + 设计文档；`prepack` 负责构建。
+- 行为与 API 不变；适配器 `0.17.1` 精确依赖本版本。
+
 ## 0.7.1 — 2026-11-08
 
 ### 可发布的 npm 平台包

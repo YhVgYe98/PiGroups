@@ -16,7 +16,7 @@ test('the platform package is public and licensed', () => {
   assert.equal(pkg.repository.type, 'git');
   assert.match(pkg.repository.url, /^git\+https:/);
   const changelog = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8');
-  assert.match(changelog, /^## 0\.7\.1\b/m, 'the changelog has this release');
+  assert.match(changelog, /^## 0\.7\.2\b/m, 'the changelog has this release');
 });
 
 test('the package exposes a runnable bin and the package metadata', () => {
@@ -30,7 +30,7 @@ test('the package exposes a runnable bin and the package metadata', () => {
 test('the tarball list contains only shipping files', () => {
   assert.deepEqual(
     [...pkg.files].sort(),
-    ['src', 'bin', 'README.md', 'CHANGELOG.md', 'LICENSE', 'docs/设计说明.md', 'docs/概念稿.md'].sort(),
+    ['dist', 'bin', 'README.md', 'CHANGELOG.md', 'LICENSE', 'docs/设计说明.md', 'docs/概念稿.md'].sort(),
   );
   assert.equal(pkg.files.includes('test'), false);
   assert.equal(pkg.files.includes('AGENTS.md'), false);

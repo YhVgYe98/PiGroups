@@ -1,0 +1,69 @@
+name: published-smoke
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      platform_version:
+        description: Published platform version (npm dist-tag or exact version)
+        required: false
+        default: latest
+
+permissions:
+  contents: read
+
+env:
+  npm_config_prefer_online: 'true'
+
+jobs:
+  published:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install the published platform
+        env:
+          PLATFORM_VERSION: ${{ inputs.platform_version || 'latest' }}
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TEMP/pigroups-npm"
+          mkdir -p "$prefix"
+          npm install --prefix "$prefix" --ignore-scripts --no-audit --no-fund "pigroups@${PLATFORM_VERSION}"
+          test -f "$prefix/node_modules/pigroups/dist/main.js"
+          test -f "$prefix/node_modules/pigroups/bin/pigroups.js"
+
+          platform_version=$(node -p "require(process.argv[1] + '/package.json').version" "$prefix/node_modules/pigroups")
+          data="$RUNNER_TEMP/pigroups-data"
+          mkdir -p "$data"
+          port=$(node -e "const net=require('net');const s=net.createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")
+          PIGROUPS_DATA="$data" PIGROUPS_PLATFORM_ID=p_5a0f00d1 PIGROUPS_ADMIN_TOKEN=smoke PORT="$port" \
+            node "$prefix/node_modules/pigroups/bin/pigroups.js" > "$RUNNER_TEMP/platform.log" 2>&1 &
+          platform_pid=$!
+          trap 'kill "$platform_pid" 2>/dev/null || true' EXIT
+
+          body=''
+          for _ in $(seq 1 60); do
+            body=$(curl -fsS "http://127.0.0.1:$port/v1/health" 2>/dev/null || true)
+            if [ -n "$body" ]; then break; fi
+            sleep 0.5
+          done
+          if [ -z "$body" ]; then
+            echo 'published platform never answered /v1/health' >&2
+            cat "$RUNNER_TEMP/platform.log" >&2 || true
+            exit 1
+          fi
+
+          echo "$body" | EXPECTED_PLATFORM_VERSION="$platform_version" node -e "
+            let s = '';
+            process.stdin.on('data', (d) => s += d).on('end', () => {
+              const health = JSON.parse(s);
+              if (health.version !== process.env.EXPECTED_PLATFORM_VERSION) {
+                console.error('health version', health.version, 'expected', process.env.EXPECTED_PLATFORM_VERSION);
+                process.exit(1);
+              }
+              console.log('health', health.version);
+            });
+          "
+          echo 'published platform smoke passed'

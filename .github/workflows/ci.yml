@@ -17,4 +17,18 @@ jobs:
       - run: npm test
       - run: npm run test:catalog:check
       - run: npm run test:package
-      - run: npm pack --dry-run
+      - name: Local tarball smoke
+        run: |
+          set -euo pipefail
+          tarball=$(npm pack --silent)
+          tar -tzf "$tarball" > /tmp/tarball-files
+          grep -qx 'package/dist/main.js' /tmp/tarball-files
+          grep -qx 'package/bin/pigroups.js' /tmp/tarball-files
+          grep -qx 'package/LICENSE' /tmp/tarball-files
+          if grep -Eq '^package/(test|AGENTS)/' /tmp/tarball-files; then
+            echo 'tarball contains test/AGENTS files' >&2
+            exit 1
+          fi
+          mkdir -p /tmp/tarball
+          tar -xzf "$tarball" -C /tmp/tarball
+          node -e "const p=require('/tmp/tarball/package/package.json'); if(p.version!==require('./package.json').version) process.exit(1)"
