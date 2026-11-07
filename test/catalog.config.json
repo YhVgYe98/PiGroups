@@ -1,0 +1,122 @@
+{
+  "files": {
+    "bootstrap.test.ts": {
+      "type": "integration",
+      "area": "bootstrap"
+    },
+    "catalog.test.ts": {
+      "type": "tooling",
+      "area": "catalog"
+    },
+    "control.test.ts": {
+      "type": "integration",
+      "area": "control"
+    },
+    "conversations.test.ts": {
+      "type": "integration",
+      "area": "conversations"
+    },
+    "envelope.test.ts": {
+      "type": "contract",
+      "area": "envelope"
+    },
+    "gap-before.test.ts": {
+      "type": "integration",
+      "area": "poll"
+    },
+    "gone-rules.test.ts": {
+      "type": "integration",
+      "area": "lifecycle"
+    },
+    "heartbeat.test.ts": {
+      "type": "integration",
+      "area": "heartbeat"
+    },
+    "history.test.ts": {
+      "type": "integration",
+      "area": "history"
+    },
+    "human-control-read.test.ts": {
+      "type": "integration",
+      "area": "control"
+    },
+    "human-path.test.ts": {
+      "type": "integration",
+      "area": "human"
+    },
+    "legacy-control-target.test.ts": {
+      "type": "regression",
+      "area": "control"
+    },
+    "lifecycle.test.ts": {
+      "type": "integration",
+      "area": "lifecycle"
+    },
+    "limits.test.ts": {
+      "type": "contract",
+      "area": "limits"
+    },
+    "long-poll.test.ts": {
+      "type": "integration",
+      "area": "poll"
+    },
+    "message-shape.test.ts": {
+      "type": "contract",
+      "area": "messages"
+    },
+    "messages.test.ts": {
+      "type": "integration",
+      "area": "messages"
+    },
+    "organization.test.ts": {
+      "type": "integration",
+      "area": "organization"
+    },
+    "persistence.test.ts": {
+      "type": "integration",
+      "area": "persistence"
+    },
+    "platform-identity.test.ts": {
+      "type": "integration",
+      "area": "platform"
+    },
+    "platform-startup.test.ts": {
+      "type": "integration",
+      "area": "startup"
+    },
+    "platforms.test.ts": {
+      "type": "integration",
+      "area": "platform"
+    },
+    "poll.test.ts": {
+      "type": "integration",
+      "area": "poll"
+    },
+    "replay-after-delete.test.ts": {
+      "type": "regression",
+      "area": "lifecycle"
+    },
+    "structure-gates.test.ts": {
+      "type": "contract",
+      "area": "auth"
+    },
+    "version.test.ts": {
+      "type": "contract",
+      "area": "version"
+    }
+  },
+  "cases": [
+    {
+      "file": "version.test.ts",
+      "title": "package-lock.json carries the same version as package.json",
+      "type": "tooling",
+      "area": "version"
+    },
+    {
+      "file": "platforms.test.ts",
+      "title": "readEndpoint ignores a record whose port is not a usable port",
+      "type": "unit",
+      "area": "platform"
+    }
+  ]
+}

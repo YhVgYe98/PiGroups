@@ -56,6 +56,7 @@ Documents are Chinese. Code, comments, commit messages, test names, and anything
   - `PIGROUPS_ADMIN_TOKEN`, when set, is read from the environment. `POST /v1/humans` requires it
 - `npm test` → `node --test test/*.test.ts`
 - `npm run typecheck` → `tsc --noEmit`
+- `npm run test:catalog` regenerates `test/CATALOG.md`; every `test/*.test.ts` file must be classified in `test/catalog.config.json` (mixed files use per-case overrides). The catalog test fails on a stale index or an unclassified case.
 
 `package.json`, `tsconfig.json`, `AGENTS.md`, `README.md`, and `docs/**` are owned by the boss. Do not edit them. Need a dependency or a script? Ask.
 

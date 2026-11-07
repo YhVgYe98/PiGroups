@@ -9,7 +9,9 @@
   "scripts": {
     "serve": "node src/main.ts",
     "test": "node --test test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:catalog": "node test/catalog.ts",
+    "test:catalog:check": "node test/catalog.ts --check"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.0",
