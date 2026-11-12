@@ -1,0 +1,36 @@
+name: publish
+
+# OIDC trusted publishing: no NPM_TOKEN, no registry-url. The npm CLI exchanges the
+# job's id-token for a short-lived credential, so a leaked secret cannot publish and
+# every release carries provenance. The workflow filename, the environment (none: this
+# job declares no `environment`) and the allowed actions are registered on the npm side
+# for the package; changing any of them here breaks the exchange.
+#
+# Release order matters: the adapter pins this package to an exact version
+# (`dependencies.pigroups`), so a platform tag must be published before the adapter
+# version that expects it.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install
+        run: npm ci
+      # This package's own `prepublishOnly` builds `dist`, then runs typecheck, the full
+      # suite, the catalog check and the package test, so a tag cannot publish a red tree.
+      - name: Publish
+        run: npm publish
