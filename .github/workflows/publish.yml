@@ -33,4 +33,4 @@ jobs:
       # This package's own `prepublishOnly` builds `dist`, then runs typecheck, the full
       # suite, the catalog check and the package test, so a tag cannot publish a red tree.
       - name: Publish
-        run: npm publish
+        run: npm publish --loglevel http
